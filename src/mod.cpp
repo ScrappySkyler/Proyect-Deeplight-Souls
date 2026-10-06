@@ -34,7 +34,7 @@
 #if ENEMY_TWEAKS
 #include "d/actor/d_a_e_dn.h"
 #include "d/actor/d_a_e_oc.h"
-#include "d/actor/d_a_e_mf.h"
+#include "d/actor/d_a_e_kk.h"
 #include "d/actor/d_a_e_sf.h"
 #include "d/actor/d_a_e_rd.h"
 #include "d/actor/d_a_b_tn.h"
@@ -72,6 +72,9 @@ DEFINE_HOOK(&daAlink_c::setGuardSe, GuardSe);
 DEFINE_HOOK(&daAlink_c::procGuardSlipInit, GuardSlipInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreakInit, GuardBreakInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreak, GuardBreakProc);
+#if ENEMY_TWEAKS
+DEFINE_HOOK(&mDoExt_McaMorfSO::play, MorfPlay);
+#endif
 DEFINE_HOOK(&daAlink_c::setSmallGuard, SmallGuard);
 DEFINE_HOOK(&daAlink_c::setShieldGuard, ShieldGuard);
 // Ataques con espada que se bloquean tras un parry
@@ -104,7 +107,7 @@ static const int SECOND_SLASH_TICKS = 30;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal (0 = desactivado; 60 = 2 s)
 static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemigo haga parry a tu tajo
-static const float ENEMY_ATTACK_ANIM_BOOST = 1.75f;   // velocidad de los movimientos de ataque enemigos (1.0 = normal)
+static const float ENEMY_ATTACK_ANIM_BOOST = 1.25f;   // velocidad de los movimientos de ataque enemigos (1.0 = normal)
 static const int ENEMY_ATTACK_WAIT_MAX = 12;   // el Darknut espera como maximo esto entre ataques (30 ticks = 1 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
 
@@ -149,6 +152,20 @@ static const int PARRY_SHAKE_TICKS = 1;   // duracion; sube a 2-3 para mas brusc
 static void parry_camera_shake() {
     dComIfGp_getVibration().StartQuake(VIBMODE_Q_POWER5, PARRY_SHAKE_TICKS, cXyz(0.0f, 1.0f, 0.0f));
 }
+// Enemigos con el sistema de parry. Los demas se comportan como en el juego original
+// (la barra de postura de Link si funciona con cualquier enemigo fijado).
+static bool is_parry_enemy(fopAc_ac_c* a) {
+    if (a == nullptr) return false;
+    s16 nm = fopAcM_GetName(a);
+    return nm == fpcNm_E_KK_e ||   // Chilfos
+           nm == fpcNm_B_TN_e ||   // Darknut
+           nm == fpcNm_E_OC_e ||   // Bokoblin
+           nm == fpcNm_E_DN_e ||   // Lizalfos
+           nm == fpcNm_E_SF_e ||   // Stalfos
+           nm == fpcNm_E_RD_e;     // Bulblin
+}
+static bool g_parryActive = true;   // sistema de parry activo (enemigo fijado de la lista, o sin fijar)
+
 static bool g_allowBash = false;    // el propio mod lanza el golpe de escudo (solo animacion)
 static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un parry
 
@@ -170,13 +187,14 @@ static fopAc_ac_c* actor_by_id(uint32_t id) {
 
 // El golpe de escudo real ya no existe: pulsar R no lo lanza, solo abre la ventana de parry.
 static HookAction on_bash_block(ModContext*, void*, void* retval, void*) {
-    if (g_allowBash) return HOOK_CONTINUE;   // lo lanza el propio mod, solo como animacion
+    if (g_allowBash || !g_parryActive) return HOOK_CONTINUE;   // el mod lo lanza como animacion, o enemigo vanilla
     if (retval != nullptr) *static_cast<int*>(retval) = 0;
     return HOOK_SKIP_ORIGINAL;
 }
 
 // El golpe de escudo del parry es solo animacion: se le quita el ataque (no golpea ni rebota).
 static void on_bash_proc_post(ModContext*, void* args, void*, void*) {
+    if (!g_allowBash) return;   // golpe de escudo normal del juego: no se toca
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
     link->mProcVar5.field_0x3012 = 0;
 }
@@ -281,7 +299,7 @@ struct GuardHelper : daAlink_c {
         if (h->mProcID == PROC_GUARD_SLIP || h->checkSmallUpperGuardAnime()) return;
 
         bool stunned = g_playerStunTimer > 0;                 // aturdido: sin escudo
-        bool noAutoShield = h->checkAttentionLock() &&
+        bool noAutoShield = g_parryActive && h->checkAttentionLock() &&
                             !mDoCPd_c::getHoldLockR(PAD_1) &&  // mantener R = escudo arriba
                             g_parryTimer <= 0;                 // y durante la ventana de parry
         if (stunned || noAutoShield) {
@@ -445,6 +463,7 @@ static void enemy_parry_tick(daAlink_c* link) {
     hit |= enemy_hit_by(link->mAtCps[2], &enemy);
     hit |= enemy_hit_by(link->mAtCyl, &enemy);
     if (!hit) return;
+    if (!is_parry_enemy(enemy)) return;   // solo los enemigos de la lista hacen parry
 
     // Tajo ya parrado: se cancelan tambien sus golpes siguientes
     if (g_enemyParryCancel > 0) {
@@ -501,23 +520,38 @@ static const int DN_ACTION_FIGHT_RUN = 3;
 static const int DN_ACTION_S_DAMAGE = 20;
 static const int DN_ACTION_DAMAGE = 21;
 
-// Acelera la animacion de ataque subiendo su velocidad de reproduccion (no salta fotogramas,
-// asi las colisiones del golpe siguen activandose). Recuerda la velocidad que puso para no
-// acumularla ni dejarla puesta cuando el enemigo deja de atacar.
-static std::unordered_map<uint32_t, float> g_boostRate;
+// Acelerar ataques: justo antes de que el juego avance la animacion de un enemigo que esta
+// atacando (McaMorfSO::play) se multiplica su velocidad, y justo despues se devuelve el valor
+// original. Asi la velocidad es siempre la misma en cada ataque, el juego no la puede reiniciar
+// y no se salta ningun fotograma (las colisiones del golpe siguen activandose).
+static std::unordered_map<mDoExt_McaMorfSO*, int> g_attackMorfs;   // morfs de enemigos atacando ahora
 
-static void boost_attack_anim(mDoExt_McaMorfSO* m, uint32_t key, bool active) {
-    if (m == nullptr || ENEMY_ATTACK_ANIM_BOOST <= 1.001f) return;   // 1.0 = desactivado
+static void boost_attack_anim(mDoExt_McaMorfSO* m, uint32_t, bool active) {
+    if (m == nullptr) return;
+    if (active) g_attackMorfs[m] = 1;
+    else g_attackMorfs.erase(m);
+}
+
+static mDoExt_McaMorfSO* g_boostedMorf = nullptr;
+static float g_boostedOrigRate = 0.0f;
+
+static HookAction on_morf_play_pre(ModContext*, void* args, void*, void*) {
+    g_boostedMorf = nullptr;
+    if (ENEMY_ATTACK_ANIM_BOOST <= 1.001f || g_attackMorfs.empty()) return HOOK_CONTINUE;
+    mDoExt_McaMorfSO* m = mods::arg<mDoExt_McaMorfSO*>(args, 0);
+    if (g_attackMorfs.find(m) == g_attackMorfs.end()) return HOOK_CONTINUE;
     float rate = m->getPlaySpeed();
-    auto it = g_boostRate.find(key);
-    bool ours = it != g_boostRate.end() && std::fabs(rate - it->second) < 0.0001f;
-    if (active) {
-        if (rate <= 0.0f || ours) return;                    // pausada, o ya acelerada
-        m->setPlaySpeed(rate * ENEMY_ATTACK_ANIM_BOOST);
-        g_boostRate[key] = rate * ENEMY_ATTACK_ANIM_BOOST;
-    } else if (it != g_boostRate.end()) {
-        if (ours) m->setPlaySpeed(rate / ENEMY_ATTACK_ANIM_BOOST);
-        g_boostRate.erase(it);
+    if (rate <= 0.0f) return HOOK_CONTINUE;                  // animacion en pausa: no se toca
+    g_boostedMorf = m;
+    g_boostedOrigRate = rate;
+    m->setPlaySpeed(rate * ENEMY_ATTACK_ANIM_BOOST);
+    return HOOK_CONTINUE;
+}
+
+static void on_morf_play_post(ModContext*, void*, void*, void*) {
+    if (g_boostedMorf != nullptr) {
+        g_boostedMorf->setPlaySpeed(g_boostedOrigRate);
+        g_boostedMorf = nullptr;
     }
 }
 
@@ -526,7 +560,7 @@ static void* tweak_enemy(void* p, void*) {
     if (ac == nullptr) return nullptr;
     s16 nm = fopAcM_GetName(ac);
     if (nm != fpcNm_E_DN_e && nm != fpcNm_E_OC_e && nm != fpcNm_B_TN_e &&
-        nm != fpcNm_E_MF_e && nm != fpcNm_E_SF_e && nm != fpcNm_E_RD_e) return nullptr;
+        nm != fpcNm_E_KK_e && nm != fpcNm_E_SF_e && nm != fpcNm_E_RD_e) return nullptr;
 
     // Aturdido por el mod: no se toca
     auto it = g_enemies.find(fopAcM_GetID(ac));
@@ -556,15 +590,10 @@ static void* tweak_enemy(void* p, void*) {
         }
         if (oc->mActionMode == 3 && oc->field_0x6c2 > 3) oc->field_0x6c2 = 3;   // espera entre ataques
         boost_attack_anim(oc->mpMorf, (uint32_t)fopAcM_GetID(ac) * 4, oc->mActionMode == 4);   // ATTACK
-    } else if (nm == fpcNm_E_MF_e) {     // Dynalfos
-        e_mf_class* mf = (e_mf_class*)ac;
-        if ((mf->mAction == DN_ACTION_S_DAMAGE || mf->mAction == DN_ACTION_DAMAGE) && ac->health > 0) {
-            mf->mAction = DN_ACTION_FIGHT_RUN;
-            mf->field_0x5b4 = 0;
-        }
-        if (mf->mAction == DN_ACTION_FIGHT_RUN && mf->field_0x6c0[2] > ENEMY_ATTACK_WAIT_MAX)
-            mf->field_0x6c0[2] = ENEMY_ATTACK_WAIT_MAX;
-        boost_attack_anim(mf->mpModelMorf, (uint32_t)fopAcM_GetID(ac) * 4, mf->mAction == 5 || mf->mAction == 6);   // ATTACK / TAIL_ATTACK
+    } else if (nm == fpcNm_E_KK_e) {     // Chilfos
+        daE_KK_c* kk = (daE_KK_c*)ac;
+        if (kk->mActionMode == 7 && ac->health > 0) kk->setActionMode(2, 0);   // DAMAGE -> WALK (sin reaccion al golpe)
+        boost_attack_anim(kk->mpMorfSO, (uint32_t)fopAcM_GetID(ac) * 4, kk->mActionMode == 8);   // ATTACK
     } else if (nm == fpcNm_E_SF_e) {     // Stalfos
         e_sf_class* sf = (e_sf_class*)ac;
         if (sf->mAction == DN_ACTION_S_DAMAGE && ac->health > 0) {
@@ -616,9 +645,13 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     if (g_parryTimer > 0) g_parryTimer--;
     if (g_attackLock > 0) g_attackLock--;
 
+    // El sistema de parry solo vale contra los enemigos de la lista (o sin enemigo fijado)
+    g_parryActive = link->mTargetedActor == nullptr || is_parry_enemy(link->mTargetedActor);
+    if (!g_parryActive) { g_parryTimer = 0; g_attackLock = 0; }
+
     // Pulsar R abre la ventana de parry (el golpe de escudo real esta desactivado).
     if (g_playerStunTimer > 0) g_parryTimer = 0;
-    else if (mDoCPd_c::getTrigLockR(PAD_1)) {
+    else if (g_parryActive && mDoCPd_c::getTrigLockR(PAD_1)) {
         g_parryTimer = PARRY_WINDOW_TICKS;
 #if PARRY_DEBUG_LOG
         svc_log->info(mod_ctx, "R pulsado: ventana de parry abierta");
@@ -637,6 +670,7 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     enemy_parry_tick(link);
 
 #if ENEMY_TWEAKS
+    g_attackMorfs.clear();
     fopAcIt_Judge(tweak_enemy, nullptr);
 #endif
 #if AUDIO_SCAN
@@ -841,6 +875,12 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
         g_bars.push_back({304.0f, PLAYER_BAR_Y, g_playerDispRatio, PLAYER_BAR_WIDTH, g_playerStunTimer > 0});
     }
 
+    // Enemigos fuera de la lista: solo la barra de Link, sin barra de enemigo
+    if (!is_parry_enemy(target)) {
+        dComIfGd_set2DXlu(&g_barDraw);
+        return;
+    }
+
     EnemyState& st = g_enemies[targetId];
 
     // Altura de la cabeza suavizada (la animacion mueve eyePos y haria temblar la barra)
@@ -893,6 +933,12 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
         return mods::set_error(error, r, "hook golpe en escudo");
     if ((r = mods::hook::add_pre<GuardSlipInit>(skip_if_parry)) != MOD_OK)
         return mods::set_error(error, r, "hook retroceso");
+#if ENEMY_TWEAKS
+    if ((r = mods::hook::add_pre<MorfPlay>(on_morf_play_pre)) != MOD_OK)
+        return mods::set_error(error, r, "hook animacion enemigos (pre)");
+    if ((r = mods::hook::add_post<MorfPlay>(on_morf_play_post)) != MOD_OK)
+        return mods::set_error(error, r, "hook animacion enemigos (post)");
+#endif
     if ((r = mods::hook::add_pre<GuardBreakProc>(on_guard_break_proc_pre)) != MOD_OK)
         return mods::set_error(error, r, "hook guardia rota (proceso)");
     if ((r = mods::hook::add_pre<GuardBreakInit>(skip_if_parry)) != MOD_OK)
@@ -947,7 +993,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     // El loader quita los hooks solo al desactivar el mod.
     g_enemies.clear();
 #if ENEMY_TWEAKS
-    g_boostRate.clear();
+    g_attackMorfs.clear();
 #endif
 #if ENABLE_BAR
     g_bars.clear();

@@ -95,7 +95,8 @@ static const float BAR_HEIGHT_ABOVE_HEAD = 60.0f;  // altura sobre la cabeza (un
 static const float BAR_WIDTH = 120.0f;             // ancho en pixeles
 static const float POS_SMOOTHING = 0.40f;          // 0-1: menor = mas suave (y mas retraso)
 static const float FILL_SMOOTHING = 0.18f;         // velocidad a la que se llena la barra
-static const float PLAYER_BAR_DECAY_PER_SEC = 0.10f; // la barra de Link se vacia 10% de la barra por segundo
+static const float PLAYER_BAR_DECAY_PER_SEC = 0.05f; // la barra de Link se vacia 5% de la barra por segundo
+static const float BLOCK_POSTURE_GAIN = 0.25f;       // castigo: cada golpe recibido con el escudo arriba sube la barra 25%
 static const float PLAYER_BAR_Y = 410.0f;          // barra de Link: altura en pantalla (abajo)
 static const float PLAYER_BAR_WIDTH = 200.0f;      // barra de Link: ancho en pixeles
 
@@ -130,6 +131,7 @@ static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un 
 // Barra de postura de Link (se llena cuando un enemigo le hace parry)
 static float g_playerPosture = 0.0f;    // 0..1 (1 = lleno -> aturdido)
 static int g_playerStunTimer = 0;       // ticks restantes aturdido
+static bool g_pendingPlayerStun = false; // hay que mostrar la animacion de aturdido (siguiente tick)
 static float g_playerDispRatio = 0.0f;  // relleno mostrado (animado)
 static int g_enemyParryCancel = 0;      // ticks cancelando los golpes del tajo ya parrado
 static int g_enemyParryCooldown = 0;    // ticks sin volver a tirar la probabilidad (mismo tajo)
@@ -158,8 +160,17 @@ static HookAction on_guard_se_pre(ModContext*, void* args, void*, void*) {
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
 
     if (g_parryTimer <= 0) {
+        // Bloqueo normal (fallaste el parry): castigo, la barra de Link sube 25%
+        if (g_playerStunTimer <= 0) {
+            g_playerPosture += BLOCK_POSTURE_GAIN;
+            if (g_playerPosture >= 0.999f) {
+                g_playerPosture = 1.0f;
+                g_playerStunTimer = PLAYER_STUN_TICKS;
+                g_pendingPlayerStun = true;   // la animacion se lanza en el siguiente tick
+            }
+        }
 #if PARRY_DEBUG_LOG
-        svc_log->info(mod_ctx, "BLOQUEO normal (el golpe llego fuera de la ventana de parry)");
+        svc_log->info(mod_ctx, "BLOQUEO normal (el golpe llego fuera de la ventana de parry): barra de Link sube");
 #endif
         return HOOK_CONTINUE;
     }
@@ -349,6 +360,13 @@ static void cancel_hit(Col& col) {
 static void enemy_parry_tick(daAlink_c* link) {
     if (g_enemyParryCancel > 0) g_enemyParryCancel--;
     if (g_enemyParryCooldown > 0) g_enemyParryCooldown--;
+
+    // Aturdido por acumular bloqueos: animacion de guardia rota
+    if (g_pendingPlayerStun) {
+        g_pendingPlayerStun = false;
+        link->procGuardBreakInit();
+        svc_log->info(mod_ctx, "BLOQUEOS: barra de Link llena, Link aturdido");
+    }
 
     // Link aturdido: expuesto a ataques
     if (g_playerStunTimer > 0) {
@@ -734,6 +752,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     g_allowBash = false;
     g_pendingBashAnim = false;
     g_playerPosture = 0.0f;
+    g_pendingPlayerStun = false;
     g_playerStunTimer = 0;
     g_playerDispRatio = 0.0f;
     g_enemyParryCancel = 0;

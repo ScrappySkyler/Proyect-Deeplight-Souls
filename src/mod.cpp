@@ -95,7 +95,7 @@ DEFINE_HOOK_SYMBOL("JASSimpleWaveBank::getWaveHandle", void*(void*, uint32_t), S
 
 // ---- Ajustes (ticks de logica: 30 por segundo) ----
 static const int PARRY_WINDOW_TICKS = 5;     // ventana tras empujar el escudo
-static const float PLAYER_BAR_DRAIN_TICKS = 7.5f;   // la barra de Link llega a cero en 0.25 s al aturdirse
+static const float PLAYER_BAR_DRAIN_TICKS = 15.0f;   // la barra de Link llega a cero en 0.5 s al aturdirse
 static const float PARRY_POSTURE_RESTORE = 0.25f;   // cada parry de Link recupera este % de su barra
 static const float ENEMY_BAR_DECAY_PER_SEC = 0.015f;   // la barra del enemigo baja 1.5%/s (la de Link: 2%/s)
 static const int PARRIES_TO_STUN = 2;        // parries para llenar la barra

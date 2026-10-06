@@ -29,6 +29,7 @@
 #include "f_op/f_op_actor_mng.h"
 #include "m_Do/m_Do_controller_pad.h"
 #include "SSystem/SComponent/c_math.h"
+#include "m_Do/m_Do_audio.h"
 
 #if ENEMY_TWEAKS
 #include "d/actor/d_a_e_dn.h"
@@ -99,7 +100,7 @@ static const int STUN_TICKS = 120;           // tiempo aturdido para empezar los
 static const int SECOND_SLASH_TICKS = 30;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 60;     // sin atacar tras un parry normal (60 = 2 s)
-static const float ENEMY_PARRY_CHANCE = 0.30f;  // probabilidad de que un enemigo haga parry a tu tajo
+static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemigo haga parry a tu tajo
 static const int ENEMY_ATTACK_WAIT_MAX = 12;   // el Darknut espera como maximo esto entre ataques (30 ticks = 1 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
 
@@ -463,7 +464,7 @@ static void enemy_parry_tick(daAlink_c* link) {
     cancel_hit(link->mAtCps[2]);
     cancel_hit(link->mAtCyl);
 
-    link->setPlayerSe(Z2SE_MIDNA_JUMP);
+    mDoAud_seStartMenu(0x49);   // Z2SE_WARP_MAP_OFF: el enemigo nos hace parry
     dComIfGp_getVibration().StartShock(VIBMODE_S_POWER4, 1, cXyz(0.0f, 1.0f, 0.0f));
     parry_camera_shake();
 

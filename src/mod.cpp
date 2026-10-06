@@ -72,6 +72,9 @@ DEFINE_HOOK(&daAlink_c::setGuardSe, GuardSe);
 DEFINE_HOOK(&daAlink_c::procGuardSlipInit, GuardSlipInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreakInit, GuardBreakInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreak, GuardBreakProc);
+#if ENEMY_TWEAKS
+DEFINE_HOOK(&mDoExt_McaMorfSO::play, MorfPlay);
+#endif
 DEFINE_HOOK(&daAlink_c::setSmallGuard, SmallGuard);
 DEFINE_HOOK(&daAlink_c::setShieldGuard, ShieldGuard);
 // Ataques con espada que se bloquean tras un parry
@@ -104,7 +107,7 @@ static const int SECOND_SLASH_TICKS = 30;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal (0 = desactivado; 60 = 2 s)
 static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemigo haga parry a tu tajo
-static const float ENEMY_ATTACK_ANIM_BOOST = 1.75f;   // velocidad de los movimientos de ataque enemigos (1.0 = normal)
+static const float ENEMY_ATTACK_ANIM_BOOST = 1.25f;   // velocidad de los movimientos de ataque enemigos (1.0 = normal)
 static const int ENEMY_ATTACK_WAIT_MAX = 12;   // el Darknut espera como maximo esto entre ataques (30 ticks = 1 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
 
@@ -501,23 +504,38 @@ static const int DN_ACTION_FIGHT_RUN = 3;
 static const int DN_ACTION_S_DAMAGE = 20;
 static const int DN_ACTION_DAMAGE = 21;
 
-// Acelera la animacion de ataque subiendo su velocidad de reproduccion (no salta fotogramas,
-// asi las colisiones del golpe siguen activandose). Recuerda la velocidad que puso para no
-// acumularla ni dejarla puesta cuando el enemigo deja de atacar.
-static std::unordered_map<uint32_t, float> g_boostRate;
+// Acelerar ataques: justo antes de que el juego avance la animacion de un enemigo que esta
+// atacando (McaMorfSO::play) se multiplica su velocidad, y justo despues se devuelve el valor
+// original. Asi la velocidad es siempre la misma en cada ataque, el juego no la puede reiniciar
+// y no se salta ningun fotograma (las colisiones del golpe siguen activandose).
+static std::unordered_map<mDoExt_McaMorfSO*, int> g_attackMorfs;   // morfs de enemigos atacando ahora
 
-static void boost_attack_anim(mDoExt_McaMorfSO* m, uint32_t key, bool active) {
-    if (m == nullptr || ENEMY_ATTACK_ANIM_BOOST <= 1.001f) return;   // 1.0 = desactivado
+static void boost_attack_anim(mDoExt_McaMorfSO* m, uint32_t, bool active) {
+    if (m == nullptr) return;
+    if (active) g_attackMorfs[m] = 1;
+    else g_attackMorfs.erase(m);
+}
+
+static mDoExt_McaMorfSO* g_boostedMorf = nullptr;
+static float g_boostedOrigRate = 0.0f;
+
+static HookAction on_morf_play_pre(ModContext*, void* args, void*, void*) {
+    g_boostedMorf = nullptr;
+    if (ENEMY_ATTACK_ANIM_BOOST <= 1.001f || g_attackMorfs.empty()) return HOOK_CONTINUE;
+    mDoExt_McaMorfSO* m = mods::arg<mDoExt_McaMorfSO*>(args, 0);
+    if (g_attackMorfs.find(m) == g_attackMorfs.end()) return HOOK_CONTINUE;
     float rate = m->getPlaySpeed();
-    auto it = g_boostRate.find(key);
-    bool ours = it != g_boostRate.end() && std::fabs(rate - it->second) < 0.0001f;
-    if (active) {
-        if (rate <= 0.0f || ours) return;                    // pausada, o ya acelerada
-        m->setPlaySpeed(rate * ENEMY_ATTACK_ANIM_BOOST);
-        g_boostRate[key] = rate * ENEMY_ATTACK_ANIM_BOOST;
-    } else if (it != g_boostRate.end()) {
-        if (ours) m->setPlaySpeed(rate / ENEMY_ATTACK_ANIM_BOOST);
-        g_boostRate.erase(it);
+    if (rate <= 0.0f) return HOOK_CONTINUE;                  // animacion en pausa: no se toca
+    g_boostedMorf = m;
+    g_boostedOrigRate = rate;
+    m->setPlaySpeed(rate * ENEMY_ATTACK_ANIM_BOOST);
+    return HOOK_CONTINUE;
+}
+
+static void on_morf_play_post(ModContext*, void*, void*, void*) {
+    if (g_boostedMorf != nullptr) {
+        g_boostedMorf->setPlaySpeed(g_boostedOrigRate);
+        g_boostedMorf = nullptr;
     }
 }
 
@@ -637,6 +655,7 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     enemy_parry_tick(link);
 
 #if ENEMY_TWEAKS
+    g_attackMorfs.clear();
     fopAcIt_Judge(tweak_enemy, nullptr);
 #endif
 #if AUDIO_SCAN
@@ -893,6 +912,12 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
         return mods::set_error(error, r, "hook golpe en escudo");
     if ((r = mods::hook::add_pre<GuardSlipInit>(skip_if_parry)) != MOD_OK)
         return mods::set_error(error, r, "hook retroceso");
+#if ENEMY_TWEAKS
+    if ((r = mods::hook::add_pre<MorfPlay>(on_morf_play_pre)) != MOD_OK)
+        return mods::set_error(error, r, "hook animacion enemigos (pre)");
+    if ((r = mods::hook::add_post<MorfPlay>(on_morf_play_post)) != MOD_OK)
+        return mods::set_error(error, r, "hook animacion enemigos (post)");
+#endif
     if ((r = mods::hook::add_pre<GuardBreakProc>(on_guard_break_proc_pre)) != MOD_OK)
         return mods::set_error(error, r, "hook guardia rota (proceso)");
     if ((r = mods::hook::add_pre<GuardBreakInit>(skip_if_parry)) != MOD_OK)
@@ -947,7 +972,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     // El loader quita los hooks solo al desactivar el mod.
     g_enemies.clear();
 #if ENEMY_TWEAKS
-    g_boostRate.clear();
+    g_attackMorfs.clear();
 #endif
 #if ENABLE_BAR
     g_bars.clear();

@@ -95,6 +95,7 @@ DEFINE_HOOK_SYMBOL("JASSimpleWaveBank::getWaveHandle", void*(void*, uint32_t), S
 
 // ---- Ajustes (ticks de logica: 30 por segundo) ----
 static const int PARRY_WINDOW_TICKS = 5;     // ventana tras empujar el escudo
+static const float ENEMY_BAR_DECAY_PER_SEC = 0.015f;   // la barra del enemigo baja 1.5%/s (la de Link: 2%/s)
 static const int PARRIES_TO_STUN = 2;        // parries para llenar la barra
 static const int STUN_TICKS = 120;           // tiempo aturdido para empezar los tajos (4 s)
 static const int SECOND_SLASH_TICKS = 30;    // tiempo para el segundo tajo
@@ -120,7 +121,7 @@ static const int MORTAL_DRAW_B = 4;
 
 // ---- Estado ----
 struct EnemyState {
-    int parries = 0;        // parries acumulados (llenado de la barra)
+    float parries = 0.0f;   // parries acumulados (llenado de la barra, baja sola con el tiempo)
     int stunTimer = 0;      // aturdido: esperando el primer tajo
     int secondTimer = 0;    // ventana del segundo tajo
     int holdTimer = 0;      // quieto mientras cae el segundo tajo
@@ -216,7 +217,7 @@ static HookAction on_guard_se_pre(ModContext*, void* args, void*, void*) {
         if (exposed) lockAttacks = false;
         if (!exposed) {
             st.parries++;
-            if (st.parries >= PARRIES_TO_STUN) {
+            if (st.parries >= PARRIES_TO_STUN - 0.15f) {   // margen: la barra baja sola
                 st.parries = PARRIES_TO_STUN;
                 st.stunTimer = STUN_TICKS;
                 stunnedNow = true;
@@ -624,6 +625,9 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
         } else if (st.holdTimer > 0) {
             a->speedF = 0.0f;
             st.holdTimer--;
+        } else if (st.parries > 0.0f) {
+            st.parries -= ENEMY_BAR_DECAY_PER_SEC * (float)PARRIES_TO_STUN / 30.0f;   // baja poco a poco
+            if (st.parries < 0.0f) st.parries = 0.0f;
         }
         ++it;
     }

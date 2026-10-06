@@ -33,6 +33,9 @@
 #if ENEMY_TWEAKS
 #include "d/actor/d_a_e_dn.h"
 #include "d/actor/d_a_e_oc.h"
+#include "d/actor/d_a_e_mf.h"
+#include "d/actor/d_a_e_sf.h"
+#include "d/actor/d_a_e_rd.h"
 #include "d/actor/d_a_b_tn.h"
 #include "f_op/f_op_actor_iter.h"
 #endif
@@ -67,6 +70,7 @@ DEFINE_HOOK(&daAlink_c::procGuardAttack, GuardAttackProc);
 DEFINE_HOOK(&daAlink_c::setGuardSe, GuardSe);
 DEFINE_HOOK(&daAlink_c::procGuardSlipInit, GuardSlipInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreakInit, GuardBreakInit);
+DEFINE_HOOK(&daAlink_c::procGuardBreak, GuardBreakProc);
 DEFINE_HOOK(&daAlink_c::setSmallGuard, SmallGuard);
 DEFINE_HOOK(&daAlink_c::setShieldGuard, ShieldGuard);
 // Ataques con espada que se bloquean tras un parry
@@ -145,6 +149,7 @@ static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un 
 
 // Barra de postura de Link (se llena cuando un enemigo le hace parry)
 static float g_playerPosture = 0.0f;    // 0..1 (1 = lleno -> aturdido)
+static bool g_dieAnim = false;          // Link aturdido con la animacion de muerte
 static int g_playerStunTimer = 0;       // ticks restantes aturdido
 static bool g_pendingPlayerStun = false; // hay que mostrar la animacion de aturdido (siguiente tick)
 static float g_playerDispRatio = 0.0f;  // relleno mostrado (animado)
@@ -374,6 +379,20 @@ static void cancel_hit(Col& col) {
     col.ResetAtHit();           // y Link no lo cuenta como golpe
 }
 
+// Aturdimiento de Link: entra en guardia rota y reemplaza la animacion por la de muerte.
+static void start_player_stun_anim(daAlink_c* link) {
+    link->procGuardBreakInit();
+    link->setSingleAnimeBase(daAlink_c::ANM_DIE);
+    g_dieAnim = true;
+}
+
+// Mientras dura el aturdimiento, el proceso de guardia rota no avanza (asi no se cancela la animacion).
+static HookAction on_guard_break_proc_pre(ModContext*, void*, void* retval, void*) {
+    if (!g_dieAnim || g_playerStunTimer <= 0) return HOOK_CONTINUE;
+    if (retval != nullptr) *static_cast<int*>(retval) = 1;
+    return HOOK_SKIP_ORIGINAL;
+}
+
 static void enemy_parry_tick(daAlink_c* link) {
     if (g_enemyParryCancel > 0) g_enemyParryCancel--;
     if (g_enemyParryCooldown > 0) g_enemyParryCooldown--;
@@ -381,7 +400,7 @@ static void enemy_parry_tick(daAlink_c* link) {
     // Aturdido por acumular bloqueos: animacion de guardia rota
     if (g_pendingPlayerStun) {
         g_pendingPlayerStun = false;
-        link->procGuardBreakInit();
+        start_player_stun_anim(link);
         svc_log->info(mod_ctx, "BLOQUEOS: barra de Link llena, Link aturdido");
     }
 
@@ -389,7 +408,7 @@ static void enemy_parry_tick(daAlink_c* link) {
     if (g_playerStunTimer > 0) {
         link->mNormalSpeed = 0.0f;
         if (g_attackLock < 2) g_attackLock = 2;
-        if (--g_playerStunTimer == 0) g_playerPosture = 0.0f;   // barra reiniciada
+        if (--g_playerStunTimer == 0) { g_playerPosture = 0.0f; g_dieAnim = false; }   // barra reiniciada
 
         // Mantener la animacion de aturdido (guardia rota) mientras dure, sin pisar los
         // estados de dano si un enemigo lo golpea.
@@ -400,7 +419,7 @@ static void enemy_parry_tick(daAlink_c* link) {
                         link->mProcID == daAlink_c::PROC_ATN_ACTOR_MOVE ||
                         link->mProcID == daAlink_c::PROC_TURN_MOVE ||
                         link->mProcID == daAlink_c::PROC_CUT_REVERSE;
-            if (calm) link->procGuardBreakInit();
+            if (calm) start_player_stun_anim(link);
         }
         return;
     }
@@ -452,7 +471,7 @@ static void enemy_parry_tick(daAlink_c* link) {
     if (g_playerPosture >= 0.999f) {
         g_playerPosture = 1.0f;
         g_playerStunTimer = PLAYER_STUN_TICKS;
-        link->procGuardBreakInit();                              // Link se tambalea aturdido
+        start_player_stun_anim(link);                              // Link se tambalea aturdido
         svc_log->info(mod_ctx, "ENEMIGO: parry, Link aturdido");
     } else {
         link->procCutReverseInit(daAlink_c::ANM_CUT_RECOIL_B);   // Link rebota
@@ -474,7 +493,8 @@ static void* tweak_enemy(void* p, void*) {
     fopAc_ac_c* ac = (fopAc_ac_c*)p;
     if (ac == nullptr) return nullptr;
     s16 nm = fopAcM_GetName(ac);
-    if (nm != fpcNm_E_DN_e && nm != fpcNm_E_OC_e && nm != fpcNm_B_TN_e) return nullptr;
+    if (nm != fpcNm_E_DN_e && nm != fpcNm_E_OC_e && nm != fpcNm_B_TN_e &&
+        nm != fpcNm_E_MF_e && nm != fpcNm_E_SF_e && nm != fpcNm_E_RD_e) return nullptr;
 
     // Aturdido por el mod: no se toca
     auto it = g_enemies.find(fopAcM_GetID(ac));
@@ -500,6 +520,30 @@ static void* tweak_enemy(void* p, void*) {
             oc->setActionMode(3, 1);   // FIND
         }
         if (oc->mActionMode == 3 && oc->field_0x6c2 > 3) oc->field_0x6c2 = 3;   // espera entre ataques
+    } else if (nm == fpcNm_E_MF_e) {     // Dynalfos
+        e_mf_class* mf = (e_mf_class*)ac;
+        if ((mf->mAction == DN_ACTION_S_DAMAGE || mf->mAction == DN_ACTION_DAMAGE) && ac->health > 0) {
+            mf->mAction = DN_ACTION_FIGHT_RUN;
+            mf->field_0x5b4 = 0;
+        }
+        if (mf->mAction == DN_ACTION_FIGHT_RUN && mf->field_0x6c0[2] > ENEMY_ATTACK_WAIT_MAX)
+            mf->field_0x6c0[2] = ENEMY_ATTACK_WAIT_MAX;
+    } else if (nm == fpcNm_E_SF_e) {     // Stalfos
+        e_sf_class* sf = (e_sf_class*)ac;
+        if (sf->mAction == DN_ACTION_S_DAMAGE && ac->health > 0) {
+            sf->mAction = DN_ACTION_FIGHT_RUN;
+            sf->mActionPhase = 0;
+        }
+        if (sf->mAction == DN_ACTION_FIGHT_RUN && sf->mTimers[2] > ENEMY_ATTACK_WAIT_MAX)
+            sf->mTimers[2] = ENEMY_ATTACK_WAIT_MAX;
+    } else if (nm == fpcNm_E_RD_e) {     // Bulblin
+        e_rd_class* rd = (e_rd_class*)ac;
+        if ((rd->action == DN_ACTION_S_DAMAGE || rd->action == DN_ACTION_DAMAGE) && ac->health > 0) {
+            rd->action = DN_ACTION_FIGHT_RUN;
+            rd->mode = 0;
+        }
+        if (rd->action == DN_ACTION_FIGHT_RUN && rd->timer[2] > ENEMY_ATTACK_WAIT_MAX)
+            rd->timer[2] = ENEMY_ATTACK_WAIT_MAX;
     } else {                              // Lizalfos (e_dn)
         e_dn_class* dn = (e_dn_class*)ac;
         if ((dn->action == DN_ACTION_S_DAMAGE || dn->action == DN_ACTION_DAMAGE) && ac->health > 0) {
@@ -776,6 +820,8 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
         return mods::set_error(error, r, "hook golpe en escudo");
     if ((r = mods::hook::add_pre<GuardSlipInit>(skip_if_parry)) != MOD_OK)
         return mods::set_error(error, r, "hook retroceso");
+    if ((r = mods::hook::add_pre<GuardBreakProc>(on_guard_break_proc_pre)) != MOD_OK)
+        return mods::set_error(error, r, "hook guardia rota (proceso)");
     if ((r = mods::hook::add_pre<GuardBreakInit>(skip_if_parry)) != MOD_OK)
         return mods::set_error(error, r, "hook guardia rota");
     if ((r = mods::hook::add_pre<SmallGuard>(skip_if_parry)) != MOD_OK)
@@ -839,6 +885,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     g_playerPosture = 0.0f;
     g_pendingPlayerStun = false;
     g_playerStunTimer = 0;
+    g_dieAnim = false;
     g_playerDispRatio = 0.0f;
     g_enemyParryCancel = 0;
     g_enemyParryCooldown = 0;

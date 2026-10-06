@@ -10,6 +10,7 @@
 // - Tras un parry que no llena la barra, Link no puede atacar con la espada un rato:
 //   solo se puede golpear al enemigo cuando queda aturdido (barra llena).
 
+#define PARRY_DEBUG_LOG 1   // 1 = anota en el registro cuando se abre la ventana de parry y los bloqueos (para pruebas)
 #define ENABLE_BAR 1   // 1 = dibuja la barra sobre el enemigo, 0 = sin barra (solo sonidos)
 #define AUDIO_SCAN 1   // 1 = herramienta para encontrar el ID del sonido (temporal), 0 = apagada
 
@@ -144,7 +145,12 @@ static void on_bash_proc_post(ModContext*, void* args, void*, void*) {
 static HookAction on_guard_se_pre(ModContext*, void* args, void*, void*) {
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
 
-    if (g_parryTimer <= 0) return HOOK_CONTINUE;
+    if (g_parryTimer <= 0) {
+#if PARRY_DEBUG_LOG
+        svc_log->info(mod_ctx, "BLOQUEO normal (el golpe llego fuera de la ventana de parry)");
+#endif
+        return HOOK_CONTINUE;
+    }
 
     if (link->mProcID == daAlink_c::PROC_SIDESTEP ||
         link->mProcID == daAlink_c::PROC_FRONT_ROLL ||
@@ -219,6 +225,7 @@ struct GuardHelper : daAlink_c {
         GuardHelper* h = static_cast<GuardHelper*>(l);
         if (h->checkAttentionLock() &&
             !mDoCPd_c::getHoldLockR(PAD_1) &&      // mantener R = escudo arriba
+            g_parryTimer <= 0 &&                   // y durante la ventana de parry, aunque sueltes R
             h->mProcID != PROC_GUARD_SLIP &&
             !h->checkSmallUpperGuardAnime()) {
             h->offNoResetFlg2(FLG2_UNK_8000000);
@@ -313,7 +320,12 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     if (g_attackLock > 0) g_attackLock--;
 
     // Pulsar R abre la ventana de parry (el golpe de escudo real esta desactivado).
-    if (mDoCPd_c::getTrigLockR(PAD_1)) g_parryTimer = PARRY_WINDOW_TICKS;
+    if (mDoCPd_c::getTrigLockR(PAD_1)) {
+        g_parryTimer = PARRY_WINDOW_TICKS;
+#if PARRY_DEBUG_LOG
+        svc_log->info(mod_ctx, "R pulsado: ventana de parry abierta");
+#endif
+    }
 
     // Animacion del golpe de escudo tras un parry (solo animacion, sin golpe real).
     if (g_pendingBashAnim) {

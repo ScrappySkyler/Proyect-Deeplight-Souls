@@ -11,6 +11,7 @@
 //   solo se puede golpear al enemigo cuando queda aturdido (barra llena).
 
 #define PARRY_DEBUG_LOG 1   // 1 = anota en el registro cuando se abre la ventana de parry y los bloqueos (para pruebas)
+#define ENEMY_TWEAKS 1      // 1 = ataques mas frecuentes y sin reaccion al golpe (Darknut, Bokoblin, Lizalfos). Si da error al compilar, pon 0
 #define ENABLE_BAR 1   // 1 = dibuja la barra sobre el enemigo, 0 = sin barra (solo sonidos)
 #define AUDIO_SCAN 1   // 1 = herramienta para encontrar el ID del sonido (temporal), 0 = apagada
 
@@ -28,6 +29,13 @@
 #include "f_op/f_op_actor_mng.h"
 #include "m_Do/m_Do_controller_pad.h"
 #include "SSystem/SComponent/c_math.h"
+
+#if ENEMY_TWEAKS
+#include "d/actor/d_a_e_dn.h"
+#include "d/actor/d_a_e_oc.h"
+#include "d/actor/d_a_b_tn.h"
+#include "f_op/f_op_actor_iter.h"
+#endif
 
 #if ENABLE_BAR
 #include "d/d_drawlist.h"
@@ -88,6 +96,7 @@ static const int SECOND_SLASH_TICKS = 30;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 60;     // sin atacar tras un parry normal (60 = 2 s)
 static const float ENEMY_PARRY_CHANCE = 0.30f;  // probabilidad de que un enemigo haga parry a tu tajo
+static const int ENEMY_ATTACK_WAIT_MAX = 12;   // el Darknut espera como maximo esto entre ataques (30 ticks = 1 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
 
 // ---- Ajustes de la barra ----
@@ -451,6 +460,60 @@ static void enemy_parry_tick(daAlink_c* link) {
     }
 }
 
+// ======================= AJUSTES A ENEMIGOS =======================
+// - Atacan mas seguido: se recorta la espera entre ataques.
+// - No reaccionan al golpe: si Link los golpea siguen peleando (la vida si baja).
+//   Solo se detienen cuando la barra se llena (aturdimiento del mod).
+// Hecho para el Darknut (e_dn). Los numeros de accion salen del codigo del juego.
+#if ENEMY_TWEAKS
+static const int DN_ACTION_FIGHT_RUN = 3;
+static const int DN_ACTION_S_DAMAGE = 20;
+static const int DN_ACTION_DAMAGE = 21;
+
+static void* tweak_enemy(void* p, void*) {
+    fopAc_ac_c* ac = (fopAc_ac_c*)p;
+    if (ac == nullptr) return nullptr;
+    s16 nm = fopAcM_GetName(ac);
+    if (nm != fpcNm_E_DN_e && nm != fpcNm_E_OC_e && nm != fpcNm_B_TN_e) return nullptr;
+
+    // Aturdido por el mod: no se toca
+    auto it = g_enemies.find(fopAcM_GetID(ac));
+    if (it != g_enemies.end()) {
+        const EnemyState& st = it->second;
+        if (st.stunTimer > 0 || st.secondTimer > 0 || st.holdTimer > 0) return nullptr;
+    }
+
+    if (nm == fpcNm_B_TN_e) {            // Darknut
+        daB_TN_c* tn = (daB_TN_c*)ac;
+        if (tn->mActionMode1 == daB_TN_c::ACT_DAMAGEH) {
+            tn->setActionMode(daB_TN_c::ACT_CHASEH, daB_TN_c::ACTION2_0_e);
+        } else if (tn->mActionMode1 == daB_TN_c::ACT_DAMAGEL) {
+            tn->setActionMode(daB_TN_c::ACT_CHASEL, daB_TN_c::ACTION2_0_e);
+        }
+        if (tn->mActionMode1 == daB_TN_c::ACT_CHASEH || tn->mActionMode1 == daB_TN_c::ACT_CHASEL) {
+            if (tn->mTimer3 > 5) tn->mTimer3 = 5;      // espera entre ataques
+            if (tn->mTimer1 > 15) tn->mTimer1 = 15;    // tiempo dando vueltas
+        }
+    } else if (nm == fpcNm_E_OC_e) {     // Bokoblin
+        daE_OC_c* oc = (daE_OC_c*)ac;
+        if ((oc->mActionMode == 5 || oc->mActionMode == 6) && ac->health > 1) {   // DAMAGE / BIG_DAMAGE
+            oc->setActionMode(3, 1);   // FIND
+        }
+        if (oc->mActionMode == 3 && oc->field_0x6c2 > 3) oc->field_0x6c2 = 3;   // espera entre ataques
+    } else {                              // Lizalfos (e_dn)
+        e_dn_class* dn = (e_dn_class*)ac;
+        if ((dn->action == DN_ACTION_S_DAMAGE || dn->action == DN_ACTION_DAMAGE) && ac->health > 0) {
+            dn->action = DN_ACTION_FIGHT_RUN;
+            dn->mode = 0;
+        }
+        if (dn->action == DN_ACTION_FIGHT_RUN && dn->timer[2] > ENEMY_ATTACK_WAIT_MAX) {
+            dn->timer[2] = ENEMY_ATTACK_WAIT_MAX;
+        }
+    }
+    return nullptr;
+}
+#endif
+
 // Lanza uno de los dos ataques del combo: Mortal Draw (tajo relampago) o ataque giratorio.
 static void launch_followup(daAlink_c* link, bool mortalDraw) {
     g_bypassLock = true;
@@ -488,6 +551,10 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
 
     // Parry de los enemigos a tus tajos y aturdimiento de Link
     enemy_parry_tick(link);
+
+#if ENEMY_TWEAKS
+    fopAcIt_Judge(tweak_enemy, nullptr);
+#endif
 #if AUDIO_SCAN
     scan_tick(link);
 #endif

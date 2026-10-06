@@ -95,7 +95,7 @@ DEFINE_HOOK_SYMBOL("JASSimpleWaveBank::getWaveHandle", void*(void*, uint32_t), S
 
 // ---- Ajustes (ticks de logica: 30 por segundo) ----
 static const int PARRY_WINDOW_TICKS = 5;     // ventana tras empujar el escudo
-static const float PLAYER_BAR_DRAIN_TICKS = 15.0f;   // la barra de Link llega a cero en 0.5 s al aturdirse
+static const float PLAYER_BAR_DRAIN_TICKS = 7.5f;   // la barra de Link llega a cero en 0.25 s al aturdirse
 static const float PARRY_POSTURE_RESTORE = 0.25f;   // cada parry de Link recupera este % de su barra
 static const float ENEMY_BAR_DECAY_PER_SEC = 0.015f;   // la barra del enemigo baja 1.5%/s (la de Link: 2%/s)
 static const int PARRIES_TO_STUN = 2;        // parries para llenar la barra
@@ -104,6 +104,7 @@ static const int SECOND_SLASH_TICKS = 30;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal (0 = desactivado; 60 = 2 s)
 static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemigo haga parry a tu tajo
+static const float ENEMY_ATTACK_ANIM_BOOST = 1.3f;   // velocidad de los movimientos de ataque enemigos (1.0 = normal)
 static const int ENEMY_ATTACK_WAIT_MAX = 12;   // el Darknut espera como maximo esto entre ataques (30 ticks = 1 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
 
@@ -500,6 +501,16 @@ static const int DN_ACTION_FIGHT_RUN = 3;
 static const int DN_ACTION_S_DAMAGE = 20;
 static const int DN_ACTION_DAMAGE = 21;
 
+// Adelanta un poco la animacion de ataque: los golpes llegan antes y son menos predecibles.
+static void boost_attack_anim(mDoExt_McaMorfSO* m) {
+    if (m == nullptr) return;
+    float rate = m->getPlaySpeed();
+    if (rate <= 0.0f || m->isLoop()) return;                 // pausada o en bucle: no se toca
+    float f = m->getFrame() + rate * (ENEMY_ATTACK_ANIM_BOOST - 1.0f);
+    if (f >= m->getEndFrame()) return;                       // que el juego termine la animacion solo
+    m->setFrameF(f);
+}
+
 static void* tweak_enemy(void* p, void*) {
     fopAc_ac_c* ac = (fopAc_ac_c*)p;
     if (ac == nullptr) return nullptr;
@@ -525,12 +536,17 @@ static void* tweak_enemy(void* p, void*) {
             if (tn->mTimer3 > 5) tn->mTimer3 = 5;      // espera entre ataques
             if (tn->mTimer1 > 15) tn->mTimer1 = 15;    // tiempo dando vueltas
         }
+        if (tn->mActionMode1 == daB_TN_c::ACT_ATTACKH || tn->mActionMode1 == daB_TN_c::ACT_ATTACKL) {
+            boost_attack_anim(tn->mpModelMorf1);
+            boost_attack_anim(tn->mpModelMorf2);
+        }
     } else if (nm == fpcNm_E_OC_e) {     // Bokoblin
         daE_OC_c* oc = (daE_OC_c*)ac;
         if ((oc->mActionMode == 5 || oc->mActionMode == 6) && ac->health > 1) {   // DAMAGE / BIG_DAMAGE
             oc->setActionMode(3, 1);   // FIND
         }
         if (oc->mActionMode == 3 && oc->field_0x6c2 > 3) oc->field_0x6c2 = 3;   // espera entre ataques
+        if (oc->mActionMode == 4) boost_attack_anim(oc->mpMorf);                  // ATTACK
     } else if (nm == fpcNm_E_MF_e) {     // Dynalfos
         e_mf_class* mf = (e_mf_class*)ac;
         if ((mf->mAction == DN_ACTION_S_DAMAGE || mf->mAction == DN_ACTION_DAMAGE) && ac->health > 0) {
@@ -539,6 +555,7 @@ static void* tweak_enemy(void* p, void*) {
         }
         if (mf->mAction == DN_ACTION_FIGHT_RUN && mf->field_0x6c0[2] > ENEMY_ATTACK_WAIT_MAX)
             mf->field_0x6c0[2] = ENEMY_ATTACK_WAIT_MAX;
+        if (mf->mAction == 5 || mf->mAction == 6) boost_attack_anim(mf->mpModelMorf);   // ATTACK / TAIL_ATTACK
     } else if (nm == fpcNm_E_SF_e) {     // Stalfos
         e_sf_class* sf = (e_sf_class*)ac;
         if (sf->mAction == DN_ACTION_S_DAMAGE && ac->health > 0) {
@@ -547,6 +564,7 @@ static void* tweak_enemy(void* p, void*) {
         }
         if (sf->mAction == DN_ACTION_FIGHT_RUN && sf->mTimers[2] > ENEMY_ATTACK_WAIT_MAX)
             sf->mTimers[2] = ENEMY_ATTACK_WAIT_MAX;
+        if (sf->mAction == 4 || sf->mAction == 5) boost_attack_anim(sf->mpModelMorf);   // ATTACK_0 / ATTACK
     } else if (nm == fpcNm_E_RD_e) {     // Bulblin
         e_rd_class* rd = (e_rd_class*)ac;
         if ((rd->action == DN_ACTION_S_DAMAGE || rd->action == DN_ACTION_DAMAGE) && ac->health > 0) {
@@ -555,6 +573,7 @@ static void* tweak_enemy(void* p, void*) {
         }
         if (rd->action == DN_ACTION_FIGHT_RUN && rd->timer[2] > ENEMY_ATTACK_WAIT_MAX)
             rd->timer[2] = ENEMY_ATTACK_WAIT_MAX;
+        if (rd->action == 4) boost_attack_anim(rd->anm_p);   // FIGHT (ataque)
     } else {                              // Lizalfos (e_dn)
         e_dn_class* dn = (e_dn_class*)ac;
         if ((dn->action == DN_ACTION_S_DAMAGE || dn->action == DN_ACTION_DAMAGE) && ac->health > 0) {
@@ -564,6 +583,7 @@ static void* tweak_enemy(void* p, void*) {
         if (dn->action == DN_ACTION_FIGHT_RUN && dn->timer[2] > ENEMY_ATTACK_WAIT_MAX) {
             dn->timer[2] = ENEMY_ATTACK_WAIT_MAX;
         }
+        if (dn->action >= 4 && dn->action <= 6) boost_attack_anim(dn->anm_p);   // ATTACK_0 / ATTACK / TAIL_ATTACK
     }
     return nullptr;
 }

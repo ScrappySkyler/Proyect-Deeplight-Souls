@@ -95,6 +95,7 @@ static const float BAR_HEIGHT_ABOVE_HEAD = 60.0f;  // altura sobre la cabeza (un
 static const float BAR_WIDTH = 120.0f;             // ancho en pixeles
 static const float POS_SMOOTHING = 0.40f;          // 0-1: menor = mas suave (y mas retraso)
 static const float FILL_SMOOTHING = 0.18f;         // velocidad a la que se llena la barra
+static const float PLAYER_BAR_DECAY_PER_SEC = 0.10f; // la barra de Link se vacia 10% de la barra por segundo
 static const float PLAYER_BAR_Y = 410.0f;          // barra de Link: altura en pantalla (abajo)
 static const float PLAYER_BAR_WIDTH = 200.0f;      // barra de Link: ancho en pixeles
 
@@ -127,7 +128,7 @@ static bool g_allowBash = false;    // el propio mod lanza el golpe de escudo (s
 static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un parry
 
 // Barra de postura de Link (se llena cuando un enemigo le hace parry)
-static int g_playerParries = 0;
+static float g_playerPosture = 0.0f;    // 0..1 (1 = lleno -> aturdido)
 static int g_playerStunTimer = 0;       // ticks restantes aturdido
 static float g_playerDispRatio = 0.0f;  // relleno mostrado (animado)
 static int g_enemyParryCancel = 0;      // ticks cancelando los golpes del tajo ya parrado
@@ -353,9 +354,25 @@ static void enemy_parry_tick(daAlink_c* link) {
     if (g_playerStunTimer > 0) {
         link->mNormalSpeed = 0.0f;
         if (g_attackLock < 2) g_attackLock = 2;
-        if (--g_playerStunTimer == 0) g_playerParries = 0;   // barra reiniciada
+        if (--g_playerStunTimer == 0) g_playerPosture = 0.0f;   // barra reiniciada
+
+        // Mantener la animacion de aturdido (guardia rota) mientras dure, sin pisar los
+        // estados de dano si un enemigo lo golpea.
+        if (g_playerStunTimer > 10) {
+            bool calm = link->mProcID == daAlink_c::PROC_WAIT ||
+                        link->mProcID == daAlink_c::PROC_MOVE ||
+                        link->mProcID == daAlink_c::PROC_ATN_ACTOR_WAIT ||
+                        link->mProcID == daAlink_c::PROC_ATN_ACTOR_MOVE ||
+                        link->mProcID == daAlink_c::PROC_TURN_MOVE ||
+                        link->mProcID == daAlink_c::PROC_CUT_REVERSE;
+            if (calm) link->procGuardBreakInit();
+        }
         return;
     }
+
+    // La barra de Link se va vaciando poco a poco
+    g_playerPosture -= PLAYER_BAR_DECAY_PER_SEC / 30.0f;
+    if (g_playerPosture < 0.0f) g_playerPosture = 0.0f;
 
     fopAc_ac_c* enemy = nullptr;
     bool hit = false;
@@ -394,14 +411,15 @@ static void enemy_parry_tick(daAlink_c* link) {
 
     link->setPlayerSe(Z2SE_MIDNA_JUMP);
     dComIfGp_getVibration().StartShock(VIBMODE_S_POWER4, 1, cXyz(0.0f, 1.0f, 0.0f));
-    link->procCutReverseInit(daAlink_c::ANM_CUT_RECOIL_B);   // Link rebota
 
-    g_playerParries++;
-    if (g_playerParries >= PARRIES_TO_STUN) {
-        g_playerParries = PARRIES_TO_STUN;
+    g_playerPosture += 1.0f / (float)PARRIES_TO_STUN;
+    if (g_playerPosture >= 0.999f) {
+        g_playerPosture = 1.0f;
         g_playerStunTimer = PLAYER_STUN_TICKS;
+        link->procGuardBreakInit();                              // Link se tambalea aturdido
         svc_log->info(mod_ctx, "ENEMIGO: parry, Link aturdido");
     } else {
+        link->procCutReverseInit(daAlink_c::ANM_CUT_RECOIL_B);   // Link rebota
         svc_log->info(mod_ctx, "ENEMIGO: parry");
     }
 }
@@ -588,22 +606,19 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
 
     g_bars.clear();
 
-    // Barra de postura de Link: parte inferior, centro de la pantalla
-    {
-        float goalP = g_playerStunTimer > 0 ? 1.0f : (float)g_playerParries / (float)PARRIES_TO_STUN;
-        g_playerDispRatio += (goalP - g_playerDispRatio) * FILL_SMOOTHING;
-        if (std::fabs(goalP - g_playerDispRatio) < 0.003f) g_playerDispRatio = goalP;
-        g_bars.push_back({304.0f, PLAYER_BAR_Y, g_playerDispRatio, PLAYER_BAR_WIDTH});
-    }
-
     // Los enemigos que ya no estan fijados reinician su suavizado de posicion.
     uint32_t targetId = target ? (uint32_t)fopAcM_GetID(target) : 0;
     for (auto& kv : g_enemies) {
         if (!target || kv.first != targetId) kv.second.hasScreen = false;
     }
-    if (!target) {
-        dComIfGd_set2DXlu(&g_barDraw);
-        return;
+    if (!target) return;   // sin enemigo fijado no se muestra ninguna barra
+
+    // Barra de postura de Link: parte inferior, centro de la pantalla (solo al fijar)
+    {
+        float goalP = g_playerStunTimer > 0 ? 1.0f : g_playerPosture;
+        g_playerDispRatio += (goalP - g_playerDispRatio) * FILL_SMOOTHING;
+        if (std::fabs(goalP - g_playerDispRatio) < 0.003f) g_playerDispRatio = goalP;
+        g_bars.push_back({304.0f, PLAYER_BAR_Y, g_playerDispRatio, PLAYER_BAR_WIDTH});
     }
 
     EnemyState& st = g_enemies[targetId];
@@ -718,7 +733,7 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     g_bypassLock = false;
     g_allowBash = false;
     g_pendingBashAnim = false;
-    g_playerParries = 0;
+    g_playerPosture = 0.0f;
     g_playerStunTimer = 0;
     g_playerDispRatio = 0.0f;
     g_enemyParryCancel = 0;

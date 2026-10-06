@@ -95,7 +95,7 @@ static const float BAR_HEIGHT_ABOVE_HEAD = 60.0f;  // altura sobre la cabeza (un
 static const float BAR_WIDTH = 120.0f;             // ancho en pixeles
 static const float POS_SMOOTHING = 0.40f;          // 0-1: menor = mas suave (y mas retraso)
 static const float FILL_SMOOTHING = 0.18f;         // velocidad a la que se llena la barra
-static const float PLAYER_BAR_DECAY_PER_SEC = 0.05f; // la barra de Link se vacia 5% de la barra por segundo
+static const float PLAYER_BAR_DECAY_PER_SEC = 0.02f; // la barra de Link se vacia 2% de la barra por segundo
 static const float BLOCK_POSTURE_GAIN = 0.25f;       // castigo: cada golpe recibido con el escudo arriba sube la barra 25%
 static const float PLAYER_BAR_Y = 410.0f;          // barra de Link: altura en pantalla (abajo)
 static const float PLAYER_BAR_WIDTH = 200.0f;      // barra de Link: ancho en pixeles
@@ -125,6 +125,12 @@ static int g_parryTimer = 0;
 static bool g_parryHitThisTick = false;
 static int g_attackLock = 0;        // ticks restantes sin poder atacar
 static bool g_bypassLock = false;   // el propio mod lanza los tajos relampago
+
+// Sacudida de camara en cada parry (de Link y de los enemigos).
+static const int PARRY_SHAKE_TICKS = 1;   // duracion; sube a 2-3 para mas brusco
+static void parry_camera_shake() {
+    dComIfGp_getVibration().StartQuake(VIBMODE_Q_POWER5, PARRY_SHAKE_TICKS, cXyz(0.0f, 1.0f, 0.0f));
+}
 static bool g_allowBash = false;    // el propio mod lanza el golpe de escudo (solo animacion)
 static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un parry
 
@@ -210,10 +216,12 @@ static HookAction on_guard_se_pre(ModContext*, void* args, void*, void*) {
         // 3er parry: sonido especial de final de salto / stun
         link->setPlayerSe(Z2SE_MIDNA_JUMP_FINISH);
         dComIfGp_getVibration().StartShock(VIBMODE_S_POWER4, 2, cXyz(0.0f, 1.0f, 0.0f));
+        parry_camera_shake();
     } else {
         // 1er y 2do parry: sonido normal
         link->setPlayerSe(Z2SE_MIDNA_JUMP);
         dComIfGp_getVibration().StartShock(VIBMODE_S_POWER4, 1, cXyz(0.0f, 1.0f, 0.0f));
+        parry_camera_shake();
     }
 
     g_pendingBashAnim = true;   // animacion del golpe de escudo (se lanza en el siguiente tick)
@@ -429,6 +437,7 @@ static void enemy_parry_tick(daAlink_c* link) {
 
     link->setPlayerSe(Z2SE_MIDNA_JUMP);
     dComIfGp_getVibration().StartShock(VIBMODE_S_POWER4, 1, cXyz(0.0f, 1.0f, 0.0f));
+    parry_camera_shake();
 
     g_playerPosture += 1.0f / (float)PARRIES_TO_STUN;
     if (g_playerPosture >= 0.999f) {
@@ -440,6 +449,17 @@ static void enemy_parry_tick(daAlink_c* link) {
         link->procCutReverseInit(daAlink_c::ANM_CUT_RECOIL_B);   // Link rebota
         svc_log->info(mod_ctx, "ENEMIGO: parry");
     }
+}
+
+// Lanza uno de los dos ataques del combo: Mortal Draw (tajo relampago) o ataque giratorio.
+static void launch_followup(daAlink_c* link, bool mortalDraw) {
+    g_bypassLock = true;
+    if (mortalDraw) {
+        link->procCutFinishInit(cM_rndF(1.0f) < 0.5f ? MORTAL_DRAW_A : MORTAL_DRAW_B);
+    } else {
+        link->procCutTurnInit(0, cM_rndF(1.0f) < 0.5f ? 1 : 0);   // giro a la derecha o a la izquierda
+    }
+    g_bypassLock = false;
 }
 
 // Cada tick de Link.
@@ -501,16 +521,14 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
         if (it != g_enemies.end()) {
             EnemyState& st = it->second;
             if (st.stunTimer > 0) {
-                st.lastWasA = cM_rndF(1.0f) < 0.5f;
-                g_bypassLock = true;
-                link->procCutFinishInit(st.lastWasA ? MORTAL_DRAW_A : MORTAL_DRAW_B);
-                g_bypassLock = false;
+                // Primer ataque al azar: Mortal Draw o ataque giratorio
+                st.lastWasA = cM_rndF(1.0f) < 0.5f;   // true = el primero fue Mortal Draw
+                launch_followup(link, st.lastWasA);
                 st.stunTimer = 0;
                 st.secondTimer = SECOND_SLASH_TICKS;
             } else if (st.secondTimer > 0) {
-                g_bypassLock = true;
-                link->procCutFinishInit(st.lastWasA ? MORTAL_DRAW_B : MORTAL_DRAW_A);
-                g_bypassLock = false;
+                // Segundo ataque: el otro de los dos
+                launch_followup(link, !st.lastWasA);
                 st.secondTimer = 0;
                 st.holdTimer = HOLD_AFTER_TICKS;
                 st.parries = 0;                            // barra reiniciada

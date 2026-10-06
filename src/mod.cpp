@@ -678,16 +678,18 @@ struct BarInfo {
     float x, y;      // centro de la barra en pantalla
     float ratio;     // 0..1 (relleno mostrado)
     float width;     // ancho en pixeles
+    bool stunned;    // barra llena / aturdido: se ilumina
 };
 static std::vector<BarInfo> g_bars;
 
 static void draw_quad(float x0, float y0, float x1, float y1,
-                      float u0, float u1, u8 alpha) {
+                      float u0, float u1, u8 alpha,
+                      u8 r = 255, u8 g = 255, u8 b = 255) {
     GXBegin(GX_QUADS, GX_VTXFMT0, 4);
-    GXPosition3f32(x0, y0, 0.0f); GXColor4u8(255, 255, 255, alpha); GXTexCoord2f32(u0, 0.0f);
-    GXPosition3f32(x1, y0, 0.0f); GXColor4u8(255, 255, 255, alpha); GXTexCoord2f32(u1, 0.0f);
-    GXPosition3f32(x1, y1, 0.0f); GXColor4u8(255, 255, 255, alpha); GXTexCoord2f32(u1, 1.0f);
-    GXPosition3f32(x0, y1, 0.0f); GXColor4u8(255, 255, 255, alpha); GXTexCoord2f32(u0, 1.0f);
+    GXPosition3f32(x0, y0, 0.0f); GXColor4u8(r, g, b, alpha); GXTexCoord2f32(u0, 0.0f);
+    GXPosition3f32(x1, y0, 0.0f); GXColor4u8(r, g, b, alpha); GXTexCoord2f32(u1, 0.0f);
+    GXPosition3f32(x1, y1, 0.0f); GXColor4u8(r, g, b, alpha); GXTexCoord2f32(u1, 1.0f);
+    GXPosition3f32(x0, y1, 0.0f); GXColor4u8(r, g, b, alpha); GXTexCoord2f32(u0, 1.0f);
     GXEnd();
 }
 
@@ -730,10 +732,24 @@ public:
 
         GXTexObj texEmpty, texFull;
 
+        // Pulso para el efecto de aturdido (sube y baja ~2 veces por segundo)
+        static int pulseTick = 0;
+        pulseTick++;
+        float pulse = 0.5f + 0.5f * std::sin((float)pulseTick * 0.2f);
+
         for (const BarInfo& bar : g_bars) {
             float barH = bar.width * (float)BAR_TEX_H / (float)BAR_TEX_W;
             float left = bar.x - bar.width * 0.5f;
             float top = bar.y - barH * 0.5f;
+
+            // Aturdido: halo dorado pulsante detras de la barra
+            if (bar.stunned) {
+                float grow = bar.width * (0.06f + 0.05f * pulse);
+                float growV = barH * (0.35f + 0.25f * pulse);
+                bind_texture(&texEmpty, TEX_BAR_EMPTY);
+                draw_quad(left - grow, top - growV, left + bar.width + grow, top + barH + growV,
+                          0.0f, 1.0f, (u8)(110 + 100 * pulse), 255, 200, 40);
+            }
 
             // Barra vacia completa
             bind_texture(&texEmpty, TEX_BAR_EMPTY);
@@ -743,9 +759,12 @@ public:
             if (bar.ratio > 0.005f) {
                 float u1 = FILL_U0 + (FILL_U1 - FILL_U0) * bar.ratio;
                 bind_texture(&texFull, TEX_BAR_FULL);
+                // Aturdido: el relleno parpadea de blanco a dorado
+                u8 gb = bar.stunned ? (u8)(255 - 110 * pulse) : (u8)255;
+                u8 bb = bar.stunned ? (u8)(255 - 200 * pulse) : (u8)255;
                 draw_quad(left + bar.width * FILL_U0, top,
                           left + bar.width * u1, top + barH,
-                          FILL_U0, u1, 255);
+                          FILL_U0, u1, 255, 255, gb, bb);
             }
         }
     }
@@ -772,7 +791,7 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
         float goalP = g_playerStunTimer > 0 ? 1.0f : g_playerPosture;
         g_playerDispRatio += (goalP - g_playerDispRatio) * FILL_SMOOTHING;
         if (std::fabs(goalP - g_playerDispRatio) < 0.003f) g_playerDispRatio = goalP;
-        g_bars.push_back({304.0f, PLAYER_BAR_Y, g_playerDispRatio, PLAYER_BAR_WIDTH});
+        g_bars.push_back({304.0f, PLAYER_BAR_Y, g_playerDispRatio, PLAYER_BAR_WIDTH, g_playerStunTimer > 0});
     }
 
     EnemyState& st = g_enemies[targetId];
@@ -809,7 +828,7 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
     st.dispRatio += (goal - st.dispRatio) * FILL_SMOOTHING;
     if (std::fabs(goal - st.dispRatio) < 0.003f) st.dispRatio = goal;
 
-    g_bars.push_back({st.sx, st.sy, st.dispRatio, BAR_WIDTH});
+    g_bars.push_back({st.sx, st.sy, st.dispRatio, BAR_WIDTH, exposed});
     dComIfGd_set2DXlu(&g_barDraw);
 }
 

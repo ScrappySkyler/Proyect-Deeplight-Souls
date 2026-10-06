@@ -465,7 +465,8 @@ static void enemy_parry_tick(daAlink_c* link) {
     cancel_hit(link->mAtCyl);
 
     mDoAud_seStartMenu(0x49);   // Z2SE_WARP_MAP_OFF: el enemigo nos hace parry
-    mDoAud_seStart(0x4000B, &link->current.pos, 0, 0);   // Z2SE_HIT_METAL_WEAPON: choque metalico de espadas
+    link->mZ2Link.startCollisionSE(0x4000B, 0x28);          // Z2SE_HIT_METAL_WEAPON, igual que el bloqueo normal del juego
+    mDoAud_seStart(0x703B2, &link->current.pos, 0, 0);       // Z2SE_EN_TN_SHIELD_BND: golpe fuerte de escudo metalico
     dComIfGp_getVibration().StartShock(VIBMODE_S_POWER4, 1, cXyz(0.0f, 1.0f, 0.0f));
     parry_camera_shake();
 

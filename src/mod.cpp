@@ -155,7 +155,6 @@ static float g_playerPosture = 0.0f;    // 0..1 (1 = lleno -> aturdido)
 static bool g_dieAnim = false;          // Link aturdido con la animacion de muerte
 static int g_playerStunTimer = 0;       // ticks restantes aturdido
 static bool g_pendingPlayerStun = false; // hay que mostrar la animacion de aturdido (siguiente tick)
-static int g_playerBreakAge = -1;       // animacion de postura rota (cuadros)
 static bool g_playerWasStunned = false;
 static float g_playerDispRatio = 0.0f;  // relleno mostrado (animado)
 static int g_enemyParryCancel = 0;      // ticks cancelando los golpes del tajo ya parrado
@@ -686,7 +685,6 @@ struct BarInfo {
     float ratio;     // 0..1 (relleno mostrado)
     float width;     // ancho en pixeles
     bool stunned;    // barra llena / aturdido: se ilumina
-    int breakAge;    // -1 = sin animacion; 0.. = cuadros desde que se rompio la postura
 };
 static std::vector<BarInfo> g_bars;
 
@@ -705,52 +703,6 @@ static void bind_texture(GXTexObj* obj, const unsigned char* data) {
     GXInitTexObj(obj, (void*)data, BAR_TEX_W, BAR_TEX_H, GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
     GXInitTexObjLOD(obj, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
     GXLoadTexObj(obj, GX_TEXMAP0);
-}
-
-static const int BREAK_ANIM_FRAMES = 80;
-
-// Segmento de linea con grosor (sin textura, color plano).
-static void draw_segment(float x0, float y0, float x1, float y1, float th, u8 r, u8 g, u8 b, u8 a) {
-    float dx = x1 - x0, dy = y1 - y0;
-    float len = std::sqrt(dx * dx + dy * dy);
-    if (len < 0.01f) return;
-    float nx = -dy / len * th * 0.5f, ny = dx / len * th * 0.5f;
-    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
-    GXPosition3f32(x0 + nx, y0 + ny, 0.0f); GXColor4u8(r, g, b, a); GXTexCoord2f32(0.0f, 0.0f);
-    GXPosition3f32(x1 + nx, y1 + ny, 0.0f); GXColor4u8(r, g, b, a); GXTexCoord2f32(0.0f, 0.0f);
-    GXPosition3f32(x1 - nx, y1 - ny, 0.0f); GXColor4u8(r, g, b, a); GXTexCoord2f32(0.0f, 0.0f);
-    GXPosition3f32(x0 - nx, y0 - ny, 0.0f); GXColor4u8(r, g, b, a); GXTexCoord2f32(0.0f, 0.0f);
-    GXEnd();
-}
-
-// Grietas en zigzag sobre la barra: crecen rapido desde el centro y se desvanecen al final.
-static void draw_cracks(float cx, float cy, float w, float h, int age) {
-    // puntos relativos (x: -0.5..0.5 del ancho, y: -0.5..0.5 del alto) para cada grieta
-    static const float P0[][2] = {{0.00f,-0.60f},{-0.04f,-0.20f},{0.05f,0.05f},{-0.03f,0.30f},{0.02f,0.62f}};
-    static const float P1[][2] = {{0.05f,0.05f},{0.16f,-0.10f},{0.24f,0.12f},{0.36f,-0.05f},{0.48f,0.20f}};
-    static const float P2[][2] = {{-0.04f,-0.20f},{-0.15f,-0.02f},{-0.26f,-0.22f},{-0.38f,0.00f},{-0.49f,-0.18f}};
-    static const float (*paths[3])[2] = {P0, P1, P2};
-
-    float grow = (float)age / 10.0f;                 // 10 cuadros en crecer del todo
-    if (grow > 1.0f) grow = 1.0f;
-    float fade = 1.0f;
-    if (age > BREAK_ANIM_FRAMES - 25) fade = (float)(BREAK_ANIM_FRAMES - age) / 25.0f;
-    if (fade < 0.0f) fade = 0.0f;
-    u8 a = (u8)(255.0f * fade);
-
-    for (int p = 0; p < 3; p++) {
-        float pathGrow = grow * 4.0f - (p == 0 ? 0.0f : 1.0f);   // las ramas empiezan un poco despues
-        for (int i = 0; i < 4; i++) {
-            float t = pathGrow - (float)i;
-            if (t <= 0.0f) break;
-            if (t > 1.0f) t = 1.0f;
-            float x0 = cx + paths[p][i][0] * w,  y0 = cy + paths[p][i][1] * h;
-            float x1 = x0 + (cx + paths[p][i + 1][0] * w - x0) * t;
-            float y1 = y0 + (cy + paths[p][i + 1][1] * h - y0) * t;
-            draw_segment(x0, y0, x1, y1, 4.5f, 0, 0, 0, a);          // contorno oscuro
-            draw_segment(x0, y0, x1, y1, 2.0f, 255, 240, 200, a);    // centro claro
-        }
-    }
 }
 
 class ParryBarDraw : public dDlst_base_c {
@@ -793,17 +745,8 @@ public:
 
         for (const BarInfo& bar : g_bars) {
             float barH = bar.width * (float)BAR_TEX_H / (float)BAR_TEX_W;
-            float bx = bar.x, by = bar.y;
-            bool breaking = bar.breakAge >= 0 && bar.breakAge < BREAK_ANIM_FRAMES;
-            if (breaking) {   // la barra tiembla al romperse y se calma
-                float amp = 7.0f * (1.0f - (float)bar.breakAge / 30.0f);
-                if (amp > 0.0f) {
-                    bx += amp * std::sin((float)bar.breakAge * 2.3f);
-                    by += amp * 0.5f * std::sin((float)bar.breakAge * 3.1f + 1.0f);
-                }
-            }
-            float left = bx - bar.width * 0.5f;
-            float top = by - barH * 0.5f;
+            float left = bar.x - bar.width * 0.5f;
+            float top = bar.y - barH * 0.5f;
 
             // Aturdido: halo dorado pulsante detras de la barra
             if (bar.stunned) {
@@ -829,19 +772,6 @@ public:
                           left + bar.width * u1, top + barH,
                           FILL_U0, u1, 255, 255, gb, bb);
             }
-
-            if (breaking) {
-                // Destello blanco al romperse
-                if (bar.breakAge < 6) {
-                    bind_texture(&texEmpty, TEX_BAR_EMPTY);
-                    draw_quad(left, top, left + bar.width, top + barH, 0.0f, 1.0f,
-                              (u8)(255 - bar.breakAge * 40), 255, 255, 255);
-                }
-                // Grietas (color plano, sin textura)
-                GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
-                draw_cracks(bx, by, bar.width, barH, bar.breakAge);
-                GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
-            }
         }
     }
 };
@@ -864,14 +794,19 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
 
     // Barra de postura de Link: parte inferior, centro de la pantalla (solo al fijar)
     {
-        float goalP = g_playerStunTimer > 0 ? 1.0f : g_playerPosture;
-        g_playerDispRatio += (goalP - g_playerDispRatio) * FILL_SMOOTHING;
-        if (std::fabs(goalP - g_playerDispRatio) < 0.003f) g_playerDispRatio = goalP;
         bool stunnedP = g_playerStunTimer > 0;
-        if (stunnedP && !g_playerWasStunned) g_playerBreakAge = 0;   // se acaba de romper la postura
+        if (stunnedP) {
+            // Postura rota: la barra arranca llena y se vacia durante el aturdimiento
+            if (!g_playerWasStunned) g_playerDispRatio = 1.0f;
+            float left = (float)g_playerStunTimer / (float)PLAYER_STUN_TICKS;
+            if (left < g_playerDispRatio) g_playerDispRatio = left;
+        } else {
+            float goalP = g_playerPosture;
+            g_playerDispRatio += (goalP - g_playerDispRatio) * FILL_SMOOTHING;
+            if (std::fabs(goalP - g_playerDispRatio) < 0.003f) g_playerDispRatio = goalP;
+        }
         g_playerWasStunned = stunnedP;
-        if (g_playerBreakAge >= 0 && ++g_playerBreakAge >= BREAK_ANIM_FRAMES) g_playerBreakAge = -1;
-        g_bars.push_back({304.0f, PLAYER_BAR_Y, g_playerDispRatio, PLAYER_BAR_WIDTH, stunnedP, g_playerBreakAge});
+        g_bars.push_back({304.0f, PLAYER_BAR_Y, g_playerDispRatio, PLAYER_BAR_WIDTH, g_playerStunTimer > 0});
     }
 
     EnemyState& st = g_enemies[targetId];
@@ -908,7 +843,7 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
     st.dispRatio += (goal - st.dispRatio) * FILL_SMOOTHING;
     if (std::fabs(goal - st.dispRatio) < 0.003f) st.dispRatio = goal;
 
-    g_bars.push_back({st.sx, st.sy, st.dispRatio, BAR_WIDTH, exposed, -1});
+    g_bars.push_back({st.sx, st.sy, st.dispRatio, BAR_WIDTH, exposed});
     dComIfGd_set2DXlu(&g_barDraw);
 }
 
@@ -991,7 +926,6 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     g_playerPosture = 0.0f;
     g_pendingPlayerStun = false;
     g_playerStunTimer = 0;
-    g_playerBreakAge = -1;
     g_playerWasStunned = false;
     g_dieAnim = false;
     g_playerDispRatio = 0.0f;

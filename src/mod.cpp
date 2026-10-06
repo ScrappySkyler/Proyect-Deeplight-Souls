@@ -82,17 +82,21 @@ DEFINE_HOOK_SYMBOL("JASSimpleWaveBank::getWaveHandle", void*(void*, uint32_t), S
 
 // ---- Ajustes (ticks de logica: 30 por segundo) ----
 static const int PARRY_WINDOW_TICKS = 5;     // ventana tras empujar el escudo
-static const int PARRIES_TO_STUN = 3;        // parries para llenar la barra
+static const int PARRIES_TO_STUN = 2;        // parries para llenar la barra
 static const int STUN_TICKS = 120;           // tiempo aturdido para empezar los tajos (4 s)
 static const int SECOND_SLASH_TICKS = 30;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 60;     // sin atacar tras un parry normal (60 = 2 s)
+static const float ENEMY_PARRY_CHANCE = 0.30f;  // probabilidad de que un enemigo haga parry a tu tajo
+static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
 
 // ---- Ajustes de la barra ----
 static const float BAR_HEIGHT_ABOVE_HEAD = 60.0f;  // altura sobre la cabeza (unidades del juego)
 static const float BAR_WIDTH = 120.0f;             // ancho en pixeles
 static const float POS_SMOOTHING = 0.40f;          // 0-1: menor = mas suave (y mas retraso)
 static const float FILL_SMOOTHING = 0.18f;         // velocidad a la que se llena la barra
+static const float PLAYER_BAR_Y = 410.0f;          // barra de Link: altura en pantalla (abajo)
+static const float PLAYER_BAR_WIDTH = 200.0f;      // barra de Link: ancho en pixeles
 
 // Valores del enum de tajos finales (Mortal Draw A y B)
 static const int MORTAL_DRAW_A = 3;
@@ -121,6 +125,13 @@ static int g_attackLock = 0;        // ticks restantes sin poder atacar
 static bool g_bypassLock = false;   // el propio mod lanza los tajos relampago
 static bool g_allowBash = false;    // el propio mod lanza el golpe de escudo (solo animacion)
 static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un parry
+
+// Barra de postura de Link (se llena cuando un enemigo le hace parry)
+static int g_playerParries = 0;
+static int g_playerStunTimer = 0;       // ticks restantes aturdido
+static float g_playerDispRatio = 0.0f;  // relleno mostrado (animado)
+static int g_enemyParryCancel = 0;      // ticks cancelando los golpes del tajo ya parrado
+static int g_enemyParryCooldown = 0;    // ticks sin volver a tirar la probabilidad (mismo tajo)
 
 static fopAc_ac_c* actor_by_id(uint32_t id) {
     fopAc_ac_c* a = nullptr;
@@ -223,11 +234,13 @@ static HookAction block_attack_void(ModContext*, void*, void*, void*) {
 struct GuardHelper : daAlink_c {
     static void remove_auto_guard(daAlink_c* l) {
         GuardHelper* h = static_cast<GuardHelper*>(l);
-        if (h->checkAttentionLock() &&
-            !mDoCPd_c::getHoldLockR(PAD_1) &&      // mantener R = escudo arriba
-            g_parryTimer <= 0 &&                   // y durante la ventana de parry, aunque sueltes R
-            h->mProcID != PROC_GUARD_SLIP &&
-            !h->checkSmallUpperGuardAnime()) {
+        if (h->mProcID == PROC_GUARD_SLIP || h->checkSmallUpperGuardAnime()) return;
+
+        bool stunned = g_playerStunTimer > 0;                 // aturdido: sin escudo
+        bool noAutoShield = h->checkAttentionLock() &&
+                            !mDoCPd_c::getHoldLockR(PAD_1) &&  // mantener R = escudo arriba
+                            g_parryTimer <= 0;                 // y durante la ventana de parry
+        if (stunned || noAutoShield) {
             h->offNoResetFlg2(FLG2_UNK_8000000);
         }
     }
@@ -312,6 +325,87 @@ static void scan_tick(daAlink_c* link) {
 }
 #endif  // AUDIO_SCAN
 
+// ======================= PARRY DE LOS ENEMIGOS A LINK =======================
+// Al tirar un tajo, si pega a un enemigo hay 30% de que el enemigo haga parry: el golpe
+// se cancela, Link rebota, suena Midna Jump y se llena la barra de postura de Link.
+// Con la barra llena Link queda aturdido (sin escudo, sin ataques, sin moverse).
+template <typename Col>
+static bool enemy_hit_by(Col& col, fopAc_ac_c** outEnemy) {
+    if (!col.ChkAtHit()) return false;
+    fopAc_ac_c* ac = col.GetAtHitAc();
+    if (!ac || fopAcM_GetGroup(ac) != fopAc_ENEMY_e) return false;
+    *outEnemy = ac;
+    return true;
+}
+
+template <typename Col>
+static void cancel_hit(Col& col) {
+    dCcD_GObjInf* tg = (dCcD_GObjInf*)col.GetAtHitGObj();
+    if (tg) tg->ResetTgHit();   // el enemigo ya no recibe el golpe
+    col.ResetAtHit();           // y Link no lo cuenta como golpe
+}
+
+static void enemy_parry_tick(daAlink_c* link) {
+    if (g_enemyParryCancel > 0) g_enemyParryCancel--;
+    if (g_enemyParryCooldown > 0) g_enemyParryCooldown--;
+
+    // Link aturdido: expuesto a ataques
+    if (g_playerStunTimer > 0) {
+        link->mNormalSpeed = 0.0f;
+        if (g_attackLock < 2) g_attackLock = 2;
+        if (--g_playerStunTimer == 0) g_playerParries = 0;   // barra reiniciada
+        return;
+    }
+
+    fopAc_ac_c* enemy = nullptr;
+    bool hit = false;
+    hit |= enemy_hit_by(link->mAtCps[0], &enemy);
+    hit |= enemy_hit_by(link->mAtCps[1], &enemy);
+    hit |= enemy_hit_by(link->mAtCps[2], &enemy);
+    hit |= enemy_hit_by(link->mAtCyl, &enemy);
+    if (!hit) return;
+
+    // Tajo ya parrado: se cancelan tambien sus golpes siguientes
+    if (g_enemyParryCancel > 0) {
+        cancel_hit(link->mAtCps[0]);
+        cancel_hit(link->mAtCps[1]);
+        cancel_hit(link->mAtCps[2]);
+        cancel_hit(link->mAtCyl);
+        return;
+    }
+    if (g_enemyParryCooldown > 0) return;   // este tajo ya paso la probabilidad sin parry
+    g_enemyParryCooldown = 24;
+
+    // Un enemigo aturdido (expuesto) no hace parry
+    auto it = g_enemies.find(fopAcM_GetID(enemy));
+    if (it != g_enemies.end()) {
+        const EnemyState& st = it->second;
+        if (st.stunTimer > 0 || st.secondTimer > 0 || st.holdTimer > 0) return;
+    }
+
+    if (cM_rndF(1.0f) >= ENEMY_PARRY_CHANCE) return;
+
+    // El enemigo hizo parry!
+    g_enemyParryCancel = 24;
+    cancel_hit(link->mAtCps[0]);
+    cancel_hit(link->mAtCps[1]);
+    cancel_hit(link->mAtCps[2]);
+    cancel_hit(link->mAtCyl);
+
+    link->setPlayerSe(Z2SE_MIDNA_JUMP);
+    dComIfGp_getVibration().StartShock(VIBMODE_S_POWER4, 1, cXyz(0.0f, 1.0f, 0.0f));
+    link->procCutReverseInit(daAlink_c::ANM_CUT_RECOIL_B);   // Link rebota
+
+    g_playerParries++;
+    if (g_playerParries >= PARRIES_TO_STUN) {
+        g_playerParries = PARRIES_TO_STUN;
+        g_playerStunTimer = PLAYER_STUN_TICKS;
+        svc_log->info(mod_ctx, "ENEMIGO: parry, Link aturdido");
+    } else {
+        svc_log->info(mod_ctx, "ENEMIGO: parry");
+    }
+}
+
 // Cada tick de Link.
 static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
@@ -320,7 +414,8 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     if (g_attackLock > 0) g_attackLock--;
 
     // Pulsar R abre la ventana de parry (el golpe de escudo real esta desactivado).
-    if (mDoCPd_c::getTrigLockR(PAD_1)) {
+    if (g_playerStunTimer > 0) g_parryTimer = 0;
+    else if (mDoCPd_c::getTrigLockR(PAD_1)) {
         g_parryTimer = PARRY_WINDOW_TICKS;
 #if PARRY_DEBUG_LOG
         svc_log->info(mod_ctx, "R pulsado: ventana de parry abierta");
@@ -334,6 +429,9 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
         link->procGuardAttackInit();
         g_allowBash = false;
     }
+
+    // Parry de los enemigos a tus tajos y aturdimiento de Link
+    enemy_parry_tick(link);
 #if AUDIO_SCAN
     scan_tick(link);
 #endif
@@ -407,6 +505,7 @@ alignas(32) static const unsigned char TEX_BAR_EMPTY[20480] = {0,0,0,0,0,0,0,0,0
 struct BarInfo {
     float x, y;      // centro de la barra en pantalla
     float ratio;     // 0..1 (relleno mostrado)
+    float width;     // ancho en pixeles
 };
 static std::vector<BarInfo> g_bars;
 
@@ -457,23 +556,23 @@ public:
         GXSetZMode(GX_DISABLE, GX_ALWAYS, GX_DISABLE);
         GXSetCullMode(GX_CULL_NONE);
 
-        const float barH = BAR_WIDTH * (float)BAR_TEX_H / (float)BAR_TEX_W;
         GXTexObj texEmpty, texFull;
 
         for (const BarInfo& bar : g_bars) {
-            float left = bar.x - BAR_WIDTH * 0.5f;
+            float barH = bar.width * (float)BAR_TEX_H / (float)BAR_TEX_W;
+            float left = bar.x - bar.width * 0.5f;
             float top = bar.y - barH * 0.5f;
 
             // Barra vacia completa
             bind_texture(&texEmpty, TEX_BAR_EMPTY);
-            draw_quad(left, top, left + BAR_WIDTH, top + barH, 0.0f, 1.0f, 255);
+            draw_quad(left, top, left + bar.width, top + barH, 0.0f, 1.0f, 255);
 
             // Relleno: solo la parte interior, hasta el porcentaje actual
             if (bar.ratio > 0.005f) {
                 float u1 = FILL_U0 + (FILL_U1 - FILL_U0) * bar.ratio;
                 bind_texture(&texFull, TEX_BAR_FULL);
-                draw_quad(left + BAR_WIDTH * FILL_U0, top,
-                          left + BAR_WIDTH * u1, top + barH,
+                draw_quad(left + bar.width * FILL_U0, top,
+                          left + bar.width * u1, top + barH,
                           FILL_U0, u1, 255);
             }
         }
@@ -489,12 +588,23 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
 
     g_bars.clear();
 
+    // Barra de postura de Link: parte inferior, centro de la pantalla
+    {
+        float goalP = g_playerStunTimer > 0 ? 1.0f : (float)g_playerParries / (float)PARRIES_TO_STUN;
+        g_playerDispRatio += (goalP - g_playerDispRatio) * FILL_SMOOTHING;
+        if (std::fabs(goalP - g_playerDispRatio) < 0.003f) g_playerDispRatio = goalP;
+        g_bars.push_back({304.0f, PLAYER_BAR_Y, g_playerDispRatio, PLAYER_BAR_WIDTH});
+    }
+
     // Los enemigos que ya no estan fijados reinician su suavizado de posicion.
     uint32_t targetId = target ? (uint32_t)fopAcM_GetID(target) : 0;
     for (auto& kv : g_enemies) {
         if (!target || kv.first != targetId) kv.second.hasScreen = false;
     }
-    if (!target) return;
+    if (!target) {
+        dComIfGd_set2DXlu(&g_barDraw);
+        return;
+    }
 
     EnemyState& st = g_enemies[targetId];
 
@@ -510,6 +620,7 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
     mDoLib_project(&p, &s);
     if (s.x < 0.0f || s.x > 608.0f || s.y < 0.0f || s.y > 448.0f) {
         st.hasScreen = false;
+        dComIfGd_set2DXlu(&g_barDraw);
         return;
     }
 
@@ -529,7 +640,7 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
     st.dispRatio += (goal - st.dispRatio) * FILL_SMOOTHING;
     if (std::fabs(goal - st.dispRatio) < 0.003f) st.dispRatio = goal;
 
-    g_bars.push_back({st.sx, st.sy, st.dispRatio});
+    g_bars.push_back({st.sx, st.sy, st.dispRatio, BAR_WIDTH});
     dComIfGd_set2DXlu(&g_barDraw);
 }
 
@@ -607,6 +718,11 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     g_bypassLock = false;
     g_allowBash = false;
     g_pendingBashAnim = false;
+    g_playerParries = 0;
+    g_playerStunTimer = 0;
+    g_playerDispRatio = 0.0f;
+    g_enemyParryCancel = 0;
+    g_enemyParryCooldown = 0;
     return MOD_OK;
 }
 

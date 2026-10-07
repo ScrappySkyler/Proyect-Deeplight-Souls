@@ -34,7 +34,6 @@
 #if ENEMY_TWEAKS
 #include "d/actor/d_a_e_dn.h"
 #include "d/actor/d_a_e_oc.h"
-#include "d/actor/d_a_e_kk.h"
 #include "d/actor/d_a_e_sf.h"
 #include "d/actor/d_a_e_rd.h"
 #include "d/actor/d_a_b_tn.h"
@@ -299,8 +298,7 @@ struct GuardHelper : daAlink_c {
         if (h->mProcID == PROC_GUARD_SLIP || h->checkSmallUpperGuardAnime()) return;
 
         bool stunned = g_playerStunTimer > 0;                 // aturdido: sin escudo
-        bool noAutoShield = g_parryActive && h->checkAttentionLock() &&
-                            !mDoCPd_c::getHoldLockR(PAD_1) &&  // mantener R = escudo arriba
+        bool noAutoShield = !mDoCPd_c::getHoldLockR(PAD_1) &&  // mantener R = escudo arriba
                             g_parryTimer <= 0;                 // y durante la ventana de parry
         if (stunned || noAutoShield) {
             h->offNoResetFlg2(FLG2_UNK_8000000);
@@ -560,7 +558,7 @@ static void* tweak_enemy(void* p, void*) {
     if (ac == nullptr) return nullptr;
     s16 nm = fopAcM_GetName(ac);
     if (nm != fpcNm_E_DN_e && nm != fpcNm_E_OC_e && nm != fpcNm_B_TN_e &&
-        nm != fpcNm_E_KK_e && nm != fpcNm_E_SF_e && nm != fpcNm_E_RD_e) return nullptr;
+        nm != fpcNm_E_SF_e && nm != fpcNm_E_RD_e) return nullptr;
 
     // Aturdido por el mod: no se toca
     auto it = g_enemies.find(fopAcM_GetID(ac));
@@ -590,10 +588,6 @@ static void* tweak_enemy(void* p, void*) {
         }
         if (oc->mActionMode == 3 && oc->field_0x6c2 > 3) oc->field_0x6c2 = 3;   // espera entre ataques
         boost_attack_anim(oc->mpMorf, (uint32_t)fopAcM_GetID(ac) * 4, oc->mActionMode == 4);   // ATTACK
-    } else if (nm == fpcNm_E_KK_e) {     // Chilfos
-        daE_KK_c* kk = (daE_KK_c*)ac;
-        if (kk->mActionMode == 7 && ac->health > 0) kk->setActionMode(2, 0);   // DAMAGE -> WALK (sin reaccion al golpe)
-        boost_attack_anim(kk->mpMorfSO, (uint32_t)fopAcM_GetID(ac) * 4, kk->mActionMode == 8);   // ATTACK
     } else if (nm == fpcNm_E_SF_e) {     // Stalfos
         e_sf_class* sf = (e_sf_class*)ac;
         if (sf->mAction == DN_ACTION_S_DAMAGE && ac->health > 0) {

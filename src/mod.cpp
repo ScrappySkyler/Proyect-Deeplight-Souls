@@ -103,7 +103,7 @@ static const float PARRY_POSTURE_RESTORE = 0.25f;   // cada parry de Link recupe
 static const float ENEMY_BAR_DECAY_PER_SEC = 0.015f;   // la barra del enemigo baja 1.5%/s (la de Link: 2%/s)
 static const int PARRIES_TO_STUN = 2;        // parries para llenar la barra
 static const int STUN_TICKS = 120;           // tiempo aturdido para empezar los tajos (4 s)
-static const int SECOND_SLASH_TICKS = 90;    // tiempo para el segundo tajo
+static const int SECOND_SLASH_TICKS = 150;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal (0 = desactivado; 60 = 2 s)
 static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemigo haga parry a tu tajo
@@ -156,6 +156,13 @@ static void parry_camera_shake() {
 }
 // Enemigos con el sistema de parry. Los demas se comportan como en el juego original
 // (la barra de postura de Link si funciona con cualquier enemigo fijado).
+// Parrys necesarios para llenar la barra de cada enemigo de la lista.
+static float parries_needed(fopAc_ac_c* a) {
+    s16 nm = a ? fopAcM_GetName(a) : 0;
+    if (nm == fpcNm_E_KK_e || nm == fpcNm_E_OC_e || nm == fpcNm_E_RD_e) return 1.0f;   // Chilfos, Bokoblin, Bulblin
+    return 2.0f;   // Darknut, Lizalfos, Stalfos
+}
+
 static bool is_parry_enemy(fopAc_ac_c* a) {
     if (a == nullptr) return false;
     s16 nm = fopAcM_GetName(a);
@@ -253,9 +260,9 @@ static HookAction on_guard_se_pre(ModContext*, void* args, void*, void*) {
         bool exposed = st.stunTimer > 0 || st.secondTimer > 0 || st.holdTimer > 0;
         if (exposed) lockAttacks = false;
         if (!exposed) {
-            st.parries++;
-            if (st.parries >= PARRIES_TO_STUN - 0.15f) {   // margen: la barra baja sola
-                st.parries = PARRIES_TO_STUN;
+            st.parries += 1.0f / parries_needed(target);   // la barra va de 0 a 1
+            if (st.parries >= 0.9f) {   // margen: la barra baja sola
+                st.parries = 1.0f;
                 st.stunTimer = STUN_TICKS;
                 stunnedNow = true;
             }
@@ -440,6 +447,7 @@ static void enemy_parry_tick(daAlink_c* link) {
     if (g_pendingPlayerStun) {
         g_pendingPlayerStun = false;
         start_player_stun_anim(link);
+        mDoAud_seStartMenu(0x2);   // Z2SE_QUIT_GAME: barra de Link llena
         svc_log->info(mod_ctx, "BLOQUEOS: barra de Link llena, Link aturdido");
     }
 
@@ -497,6 +505,11 @@ static void enemy_parry_tick(daAlink_c* link) {
     if (cM_rndF(1.0f) >= ENEMY_PARRY_CHANCE) return;
 
     // El enemigo hizo parry!
+    {
+        EnemyState& est = g_enemies[fopAcM_GetID(enemy)];   // su barra baja 15%
+        est.parries -= 0.15f;
+        if (est.parries < 0.0f) est.parries = 0.0f;
+    }
     g_enemyParryCancel = 24;
     cancel_hit(link->mAtCps[0]);
     cancel_hit(link->mAtCps[1]);
@@ -514,6 +527,7 @@ static void enemy_parry_tick(daAlink_c* link) {
         g_playerPosture = 1.0f;
         g_playerStunTimer = PLAYER_STUN_TICKS;
         start_player_stun_anim(link);                              // Link se tambalea aturdido
+        mDoAud_seStartMenu(0x2);   // Z2SE_QUIT_GAME: barra de Link llena
         svc_log->info(mod_ctx, "ENEMIGO: parry, Link aturdido");
     } else {
         link->procCutReverseInit(daAlink_c::ANM_CUT_RECOIL_B);   // Link rebota
@@ -684,7 +698,8 @@ static void launch_followup(daAlink_c* link, int kind) {
 }
 
 static bool link_in_combo_attack(daAlink_c* link) {
-    return link->mProcID == daAlink_c::PROC_CUT_TURN || link->mProcID == daAlink_c::PROC_CUT_TURN_MOVE ||
+    return link->mProcID == daAlink_c::PROC_CUT_FINISH || link->mProcID == daAlink_c::PROC_CUT_FINISH_JUMP_UP ||
+           link->mProcID == daAlink_c::PROC_CUT_FINISH_JUMP_UP_LAND || link->mProcID == daAlink_c::PROC_CUT_TURN || link->mProcID == daAlink_c::PROC_CUT_TURN_MOVE ||
            link->mProcID == daAlink_c::PROC_CUT_HEAD || link->mProcID == daAlink_c::PROC_CUT_HEAD_LAND;
 }
 
@@ -766,7 +781,7 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
             a->speedF = 0.0f;
             st.holdTimer--;
         } else if (st.parries > 0.0f) {
-            st.parries -= ENEMY_BAR_DECAY_PER_SEC * (float)PARRIES_TO_STUN / 30.0f;   // baja poco a poco
+            st.parries -= ENEMY_BAR_DECAY_PER_SEC / 30.0f;   // baja poco a poco
             if (st.parries < 0.0f) st.parries = 0.0f;
         }
         ++it;
@@ -789,11 +804,11 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
             // Parry final: solo giratorio y Helm Splitter, orden aleatorio; uno termina antes del otro
             if (!busy) {
                 if (stp->stunTimer > 0) {
-                    launch_followup(link, trigA ? 2 : 1);   // A = Helm Splitter, B = giratorio
+                    launch_followup(link, trigA ? 2 : 0);   // A: Helm Splitter / B: Mortal Draw
                     stp->stunTimer = 0;
                     stp->secondTimer = SECOND_SLASH_TICKS;
                 } else {
-                    launch_followup(link, trigA ? 2 : 1);
+                    launch_followup(link, trigA ? 2 : 1);   // A: Helm Splitter / B: giratorio
                     stp->secondTimer = 0;
                     stp->holdTimer = HOLD_AFTER_TICKS;
                     stp->parries = 0;
@@ -992,7 +1007,7 @@ static void on_link_draw_post(ModContext*, void* args, void*, void*) {
 
     // Relleno animado hacia el valor real
     bool exposed = st.stunTimer > 0 || st.secondTimer > 0 || st.holdTimer > 0;
-    float goal = exposed ? 1.0f : (float)st.parries / (float)PARRIES_TO_STUN;
+    float goal = exposed ? 1.0f : st.parries;
     st.dispRatio += (goal - st.dispRatio) * FILL_SMOOTHING;
     if (std::fabs(goal - st.dispRatio) < 0.003f) st.dispRatio = goal;
 

@@ -72,7 +72,6 @@ DEFINE_HOOK(&daAlink_c::setGuardSe, GuardSe);
 DEFINE_HOOK(&daAlink_c::procGuardSlipInit, GuardSlipInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreakInit, GuardBreakInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreak, GuardBreakProc);
-DEFINE_HOOK(&daAlink_c::procGuardAttack, GuardAttackProc);
 #if ENEMY_TWEAKS
 DEFINE_HOOK(&mDoExt_McaMorfSO::play, MorfPlay);
 #endif
@@ -199,16 +198,9 @@ static HookAction on_bash_block(ModContext*, void*, void* retval, void*) {
     return HOOK_SKIP_ORIGINAL;
 }
 
-// El golpe de escudo del parry es solo animacion: se le quita el ataque (no golpea ni rebota).
+// El golpe de escudo del parry es solo animacion: cada tick se apaga su colision
+// (sin empuje, sin dano, sin rebote) con cualquier enemigo. El golpe real (doble R) no se toca.
 static void on_bash_proc_post(ModContext*, void* args, void*, void*) {
-    if (!g_allowBash || g_realBash) return;   // el golpe real (doble R) conserva su ataque
-    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
-    link->mProcVar5.field_0x3012 = 0;
-}
-
-// Mientras dura el golpe de escudo del parry se apaga su colision cada tick: es solo animacion
-// (sin empuje, sin dano, sin retroceso) con cualquier enemigo.
-static void on_bash_tick_post(ModContext*, void* args, void*, void*) {
     if (!g_bashAnimOnly) return;
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
     if (link->mProcID == daAlink_c::PROC_GUARD_ATTACK) link->mProcVar5.field_0x3012 = 0;
@@ -1005,8 +997,6 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
     if ((r = mods::hook::add_post<MorfPlay>(on_morf_play_post)) != MOD_OK)
         return mods::set_error(error, r, "hook animacion enemigos (post)");
 #endif
-    if ((r = mods::hook::add_post<GuardAttackProc>(on_bash_tick_post)) != MOD_OK)
-        return mods::set_error(error, r, "hook golpe de escudo (tick)");
     if ((r = mods::hook::add_pre<GuardBreakProc>(on_guard_break_proc_pre)) != MOD_OK)
         return mods::set_error(error, r, "hook guardia rota (proceso)");
     if ((r = mods::hook::add_pre<GuardBreakInit>(skip_if_parry)) != MOD_OK)

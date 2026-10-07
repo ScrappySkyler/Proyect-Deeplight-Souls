@@ -103,7 +103,7 @@ static const float PARRY_POSTURE_RESTORE = 0.25f;   // cada parry de Link recupe
 static const float ENEMY_BAR_DECAY_PER_SEC = 0.015f;   // la barra del enemigo baja 1.5%/s (la de Link: 2%/s)
 static const int PARRIES_TO_STUN = 2;        // parries para llenar la barra
 static const int STUN_TICKS = 120;           // tiempo aturdido para empezar los tajos (4 s)
-static const int SECOND_SLASH_TICKS = 30;    // tiempo para el segundo tajo
+static const int SECOND_SLASH_TICKS = 90;    // tiempo para el segundo tajo
 static const int HOLD_AFTER_TICKS = 20;      // enemigo quieto mientras cae el segundo tajo
 static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal (0 = desactivado; 60 = 2 s)
 static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemigo haga parry a tu tajo
@@ -173,6 +173,9 @@ static int g_bashCooldown = 0;       // ticks hasta poder repetir el golpe de es
 static bool g_bashAnimOnly = false;  // golpe de escudo del parry en curso: solo animacion
 static bool g_realBash = false;     // golpe de escudo real (doble R), con ataque y todo
 static bool g_allowBash = false;    // el propio mod lanza el golpe de escudo (solo animacion)
+static int g_mdWindow = 0;           // parry normal: ticks restantes para el Mortal Draw con B
+static int g_comboBusy = 0;          // ticks minimos hasta poder lanzar el siguiente ataque del combo
+static bool g_comboLastHead = false; // ultimo ataque del combo fue Helm Splitter
 static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un parry
 
 // Barra de postura de Link (se llena cuando un enemigo le hace parry)
@@ -203,7 +206,7 @@ static HookAction on_bash_block(ModContext*, void*, void* retval, void*) {
 static void on_bash_proc_post(ModContext*, void* args, void*, void*) {
     if (!g_bashAnimOnly) return;
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
-    if (link->mProcID == daAlink_c::PROC_GUARD_ATTACK) link->mProcVar5.field_0x3012 = 0;
+    if (link->mProcID == daAlink_c::PROC_GUARD_ATTACK) { link->mProcVar5.field_0x3012 = 0; link->mNormalSpeed = 0.0f; }
     else g_bashAnimOnly = false;
 }
 
@@ -274,6 +277,7 @@ static HookAction on_guard_se_pre(ModContext*, void* args, void*, void*) {
         parry_camera_shake();
     }
 
+    g_mdWindow = stunnedNow ? 0 : 45;
     g_pendingBashAnim = true;   // animacion del golpe de escudo (se lanza en el siguiente tick)
 
     svc_log->info(mod_ctx, stunnedNow ? "PARRY: enemigo aturdido" : "PARRY");
@@ -665,15 +669,23 @@ static void* tweak_enemy(void* p, void*) {
 }
 #endif
 
-// Lanza uno de los dos ataques del combo: Mortal Draw (tajo relampago) o ataque giratorio.
-static void launch_followup(daAlink_c* link, bool mortalDraw) {
+// Lanza un ataque: 0 = Mortal Draw, 1 = ataque giratorio, 2 = Helm Splitter.
+static void launch_followup(daAlink_c* link, int kind) {
     g_bypassLock = true;
-    if (mortalDraw) {
+    if (kind == 0) {
         link->procCutFinishInit(cM_rndF(1.0f) < 0.5f ? MORTAL_DRAW_A : MORTAL_DRAW_B);
+    } else if (kind == 1) {
+        link->procCutTurnInit(0, cM_rndF(1.0f) < 0.5f ? 1 : 0);
     } else {
-        link->procCutTurnInit(0, cM_rndF(1.0f) < 0.5f ? 1 : 0);   // giro a la derecha o a la izquierda
+        link->procCutHeadInit();
     }
     g_bypassLock = false;
+    g_comboBusy = 8;
+}
+
+static bool link_in_combo_attack(daAlink_c* link) {
+    return link->mProcID == daAlink_c::PROC_CUT_TURN || link->mProcID == daAlink_c::PROC_CUT_TURN_MOVE ||
+           link->mProcID == daAlink_c::PROC_CUT_HEAD || link->mProcID == daAlink_c::PROC_CUT_HEAD_LAND;
 }
 
 // Cada tick de Link.
@@ -760,25 +772,36 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
         ++it;
     }
 
-    // Tajos relampago sobre el enemigo fijado, si esta aturdido.
+    // Combo con B
+    if (g_mdWindow > 0) g_mdWindow--;
+    if (g_comboBusy > 0) g_comboBusy--;
     fopAc_ac_c* target = link->mTargetedActor;
-    if (target && mDoCPd_c::getTrigB(PAD_1)) {
-        auto it = g_enemies.find(fopAcM_GetID(target));
-        if (it != g_enemies.end()) {
-            EnemyState& st = it->second;
-            if (st.stunTimer > 0) {
-                // Primer ataque al azar: Mortal Draw o ataque giratorio
-                st.lastWasA = cM_rndF(1.0f) < 0.5f;   // true = el primero fue Mortal Draw
-                launch_followup(link, st.lastWasA);
-                st.stunTimer = 0;
-                st.secondTimer = SECOND_SLASH_TICKS;
-            } else if (st.secondTimer > 0) {
-                // Segundo ataque: el otro de los dos
-                launch_followup(link, !st.lastWasA);
-                st.secondTimer = 0;
-                st.holdTimer = HOLD_AFTER_TICKS;
-                st.parries = 0;                            // barra reiniciada
+    if (mDoCPd_c::getTrigB(PAD_1)) {
+        EnemyState* stp = nullptr;
+        if (target) {
+            auto it = g_enemies.find(fopAcM_GetID(target));
+            if (it != g_enemies.end()) stp = &it->second;
+        }
+        bool busy = g_comboBusy > 0 || link_in_combo_attack(link);
+        if (stp && (stp->stunTimer > 0 || stp->secondTimer > 0)) {
+            // Parry final: solo giratorio y Helm Splitter, orden aleatorio; uno termina antes del otro
+            if (!busy) {
+                if (stp->stunTimer > 0) {
+                    g_comboLastHead = cM_rndF(1.0f) < 0.5f;
+                    launch_followup(link, g_comboLastHead ? 2 : 1);
+                    stp->stunTimer = 0;
+                    stp->secondTimer = SECOND_SLASH_TICKS;
+                } else {
+                    g_comboLastHead = !g_comboLastHead;
+                    launch_followup(link, g_comboLastHead ? 2 : 1);
+                    stp->secondTimer = 0;
+                    stp->holdTimer = HOLD_AFTER_TICKS;
+                    stp->parries = 0;
+                }
             }
+        } else if (g_mdWindow > 0 && !busy) {
+            g_mdWindow = 0;
+            launch_followup(link, 0);
         }
     }
     return HOOK_CONTINUE;

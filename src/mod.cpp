@@ -776,7 +776,9 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     if (g_mdWindow > 0) g_mdWindow--;
     if (g_comboBusy > 0) g_comboBusy--;
     fopAc_ac_c* target = link->mTargetedActor;
-    if (mDoCPd_c::getTrigB(PAD_1)) {
+    bool trigB = mDoCPd_c::getTrigB(PAD_1);
+    bool trigA = mDoCPd_c::getTrigA(PAD_1);
+    if (trigB || trigA) {
         EnemyState* stp = nullptr;
         if (target) {
             auto it = g_enemies.find(fopAcM_GetID(target));
@@ -787,19 +789,17 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
             // Parry final: solo giratorio y Helm Splitter, orden aleatorio; uno termina antes del otro
             if (!busy) {
                 if (stp->stunTimer > 0) {
-                    g_comboLastHead = cM_rndF(1.0f) < 0.5f;
-                    launch_followup(link, g_comboLastHead ? 2 : 1);
+                    launch_followup(link, trigA ? 2 : 1);   // A = Helm Splitter, B = giratorio
                     stp->stunTimer = 0;
                     stp->secondTimer = SECOND_SLASH_TICKS;
                 } else {
-                    g_comboLastHead = !g_comboLastHead;
-                    launch_followup(link, g_comboLastHead ? 2 : 1);
+                    launch_followup(link, trigA ? 2 : 1);
                     stp->secondTimer = 0;
                     stp->holdTimer = HOLD_AFTER_TICKS;
                     stp->parries = 0;
                 }
             }
-        } else if (g_mdWindow > 0 && !busy) {
+        } else if (trigB && g_mdWindow > 0 && !busy) {
             g_mdWindow = 0;
             launch_followup(link, 0);
         }

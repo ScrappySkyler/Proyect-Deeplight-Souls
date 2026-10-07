@@ -72,6 +72,7 @@ DEFINE_HOOK(&daAlink_c::setGuardSe, GuardSe);
 DEFINE_HOOK(&daAlink_c::procGuardSlipInit, GuardSlipInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreakInit, GuardBreakInit);
 DEFINE_HOOK(&daAlink_c::procGuardBreak, GuardBreakProc);
+DEFINE_HOOK(&daAlink_c::procGuardAttack, GuardAttackProc);
 #if ENEMY_TWEAKS
 DEFINE_HOOK(&mDoExt_McaMorfSO::play, MorfPlay);
 #endif
@@ -170,6 +171,7 @@ static bool g_parryActive = true;   // sistema de parry activo (enemigo fijado d
 
 static int g_rTapTimer = 0;         // ticks para la segunda pulsacion de R (doble toque)
 static int g_bashCooldown = 0;       // ticks hasta poder repetir el golpe de escudo
+static bool g_bashAnimOnly = false;  // golpe de escudo del parry en curso: solo animacion
 static bool g_realBash = false;     // golpe de escudo real (doble R), con ataque y todo
 static bool g_allowBash = false;    // el propio mod lanza el golpe de escudo (solo animacion)
 static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un parry
@@ -202,6 +204,15 @@ static void on_bash_proc_post(ModContext*, void* args, void*, void*) {
     if (!g_allowBash || g_realBash) return;   // el golpe real (doble R) conserva su ataque
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
     link->mProcVar5.field_0x3012 = 0;
+}
+
+// Mientras dura el golpe de escudo del parry se apaga su colision cada tick: es solo animacion
+// (sin empuje, sin dano, sin retroceso) con cualquier enemigo.
+static void on_bash_tick_post(ModContext*, void* args, void*, void*) {
+    if (!g_bashAnimOnly) return;
+    daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
+    if (link->mProcID == daAlink_c::PROC_GUARD_ATTACK) link->mProcVar5.field_0x3012 = 0;
+    else g_bashAnimOnly = false;
 }
 
 // Un golpe pego en el escudo.
@@ -703,6 +714,7 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
             g_bashCooldown = BASH_COOLDOWN_TICKS;
             g_allowBash = true;
             g_realBash = true;
+            g_bashAnimOnly = false;
             link->procGuardAttackInit();
             g_realBash = false;
             g_allowBash = false;
@@ -715,6 +727,7 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     if (g_pendingBashAnim) {
         g_pendingBashAnim = false;
         g_allowBash = true;
+        g_bashAnimOnly = true;
         link->procGuardAttackInit();
         g_allowBash = false;
     }
@@ -992,6 +1005,8 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
     if ((r = mods::hook::add_post<MorfPlay>(on_morf_play_post)) != MOD_OK)
         return mods::set_error(error, r, "hook animacion enemigos (post)");
 #endif
+    if ((r = mods::hook::add_post<GuardAttackProc>(on_bash_tick_post)) != MOD_OK)
+        return mods::set_error(error, r, "hook golpe de escudo (tick)");
     if ((r = mods::hook::add_pre<GuardBreakProc>(on_guard_break_proc_pre)) != MOD_OK)
         return mods::set_error(error, r, "hook guardia rota (proceso)");
     if ((r = mods::hook::add_pre<GuardBreakInit>(skip_if_parry)) != MOD_OK)

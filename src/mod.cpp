@@ -34,6 +34,7 @@
 #if ENEMY_TWEAKS
 #include "d/actor/d_a_e_dn.h"
 #include "d/actor/d_a_e_oc.h"
+#include "d/actor/d_a_e_kk.h"
 #include "d/actor/d_a_e_sf.h"
 #include "d/actor/d_a_e_rd.h"
 #include "d/actor/d_a_b_tn.h"
@@ -108,6 +109,7 @@ static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal 
 static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemigo haga parry a tu tajo
 static const float ENEMY_ATTACK_ANIM_BOOST = 1.25f;   // velocidad de los movimientos de ataque enemigos (1.0 = normal)
 static const int ENEMY_ATTACK_WAIT_MAX = 12;   // el Darknut espera como maximo esto entre ataques (30 ticks = 1 s)
+static const int BASH_COOLDOWN_TICKS = 30;     // espera entre golpes de escudo (R + Y): 30 = 1 s
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
 
 // ---- Ajustes de la barra ----
@@ -165,6 +167,7 @@ static bool is_parry_enemy(fopAc_ac_c* a) {
 }
 static bool g_parryActive = true;   // sistema de parry activo (enemigo fijado de la lista, o sin fijar)
 
+static int g_bashCooldown = 0;       // ticks hasta poder repetir el golpe de escudo (R + Y)
 static bool g_realBash = false;     // golpe de escudo real (R + Y), con ataque y todo
 static bool g_allowBash = false;    // el propio mod lanza el golpe de escudo (solo animacion)
 static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un parry
@@ -554,10 +557,45 @@ static void on_morf_play_post(ModContext*, void*, void*, void*) {
     }
 }
 
+// Un enemigo aturdido por la barra llena no puede guardar: si esta en postura de guardia
+// se le saca de ella (asi los tajos relampago le pegan).
+static void unguard_exposed(fopAc_ac_c* ac, s16 nm) {
+    if (nm == fpcNm_B_TN_e) {            // Darknut
+        daB_TN_c* tn = (daB_TN_c*)ac;
+        int a = tn->mActionMode1;
+        if (a == daB_TN_c::ACT_GUARDH || a == daB_TN_c::ACT_ATTACKSHIELDH)
+            tn->setActionMode(daB_TN_c::ACT_CHASEH, daB_TN_c::ACTION2_0_e);
+        else if (a == daB_TN_c::ACT_GUARDL || a == daB_TN_c::ACT_ATTACKSHIELDL)
+            tn->setActionMode(daB_TN_c::ACT_CHASEL, daB_TN_c::ACTION2_0_e);
+    } else if (nm == fpcNm_E_DN_e) {     // Lizalfos
+        e_dn_class* dn = (e_dn_class*)ac;
+        if (dn->action == 7) { dn->action = DN_ACTION_FIGHT_RUN; dn->mode = 0; }   // GUARD
+    } else if (nm == fpcNm_E_SF_e) {     // Stalfos
+        e_sf_class* sf = (e_sf_class*)ac;
+        if (sf->mAction == 7) { sf->mAction = DN_ACTION_FIGHT_RUN; sf->mActionPhase = 0; }   // GUARD
+    } else if (nm == fpcNm_E_KK_e) {     // Chilfos
+        daE_KK_c* kk = (daE_KK_c*)ac;
+        if (kk->mActionMode == 6) kk->setActionMode(0, 0);   // GUARD -> WAIT
+    }
+}
+
 static void* tweak_enemy(void* p, void*) {
     fopAc_ac_c* ac = (fopAc_ac_c*)p;
     if (ac == nullptr) return nullptr;
     s16 nm = fopAcM_GetName(ac);
+
+    // Aturdido por el mod: sin guardia, y no se toca mas
+    {
+        auto it0 = g_enemies.find(fopAcM_GetID(ac));
+        if (it0 != g_enemies.end()) {
+            const EnemyState& st0 = it0->second;
+            if (st0.stunTimer > 0 || st0.secondTimer > 0 || st0.holdTimer > 0) {
+                unguard_exposed(ac, nm);
+                return nullptr;
+            }
+        }
+    }
+
     if (nm != fpcNm_E_DN_e && nm != fpcNm_E_OC_e && nm != fpcNm_B_TN_e &&
         nm != fpcNm_E_SF_e && nm != fpcNm_E_RD_e) return nullptr;
 
@@ -654,7 +692,11 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
     }
 
     // R + Y: golpe de escudo real, con cualquier enemigo (R solo ya no lo lanza)
-    if (g_playerStunTimer <= 0 && mDoCPd_c::getHoldLockR(PAD_1) && mDoCPd_c::getTrigY(PAD_1)) {
+    if (g_bashCooldown > 0) g_bashCooldown--;
+    // Solo hace falta R (+ Y); no se exige L, asi funciona con la fijacion alternada.
+    if (g_playerStunTimer <= 0 && g_bashCooldown <= 0 &&
+        (mDoCPd_c::getHoldR(PAD_1) || mDoCPd_c::getHoldLockR(PAD_1)) && mDoCPd_c::getTrigY(PAD_1)) {
+        g_bashCooldown = BASH_COOLDOWN_TICKS;
         g_allowBash = true;
         g_realBash = true;
         link->procGuardAttackInit();

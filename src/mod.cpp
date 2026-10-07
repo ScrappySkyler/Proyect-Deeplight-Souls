@@ -109,7 +109,8 @@ static const int ATTACK_LOCK_TICKS = 0;      // sin atacar tras un parry normal 
 static const float ENEMY_PARRY_CHANCE = 0.50f;  // probabilidad de que un enemigo haga parry a tu tajo
 static const float ENEMY_ATTACK_ANIM_BOOST = 1.25f;   // velocidad de los movimientos de ataque enemigos (1.0 = normal)
 static const int ENEMY_ATTACK_WAIT_MAX = 12;   // el Darknut espera como maximo esto entre ataques (30 ticks = 1 s)
-static const int BASH_COOLDOWN_TICKS = 30;     // espera entre golpes de escudo (R + Y): 30 = 1 s
+static const int BASH_COOLDOWN_TICKS = 30;     // espera entre golpes de escudo: 30 = 1 s
+static const int DOUBLE_TAP_TICKS = 12;        // tiempo maximo entre las dos R seguidas (12 = 0.4 s)
 static const int PLAYER_STUN_TICKS = 90;     // tiempo que Link queda aturdido (90 = 3 s)
 
 // ---- Ajustes de la barra ----
@@ -167,8 +168,9 @@ static bool is_parry_enemy(fopAc_ac_c* a) {
 }
 static bool g_parryActive = true;   // sistema de parry activo (enemigo fijado de la lista, o sin fijar)
 
-static int g_bashCooldown = 0;       // ticks hasta poder repetir el golpe de escudo (R + Y)
-static bool g_realBash = false;     // golpe de escudo real (R + Y), con ataque y todo
+static int g_rTapTimer = 0;         // ticks para la segunda pulsacion de R (doble toque)
+static int g_bashCooldown = 0;       // ticks hasta poder repetir el golpe de escudo
+static bool g_realBash = false;     // golpe de escudo real (doble R), con ataque y todo
 static bool g_allowBash = false;    // el propio mod lanza el golpe de escudo (solo animacion)
 static bool g_pendingBashAnim = false;  // hay que mostrar la animacion tras un parry
 
@@ -190,14 +192,14 @@ static fopAc_ac_c* actor_by_id(uint32_t id) {
 
 // El golpe de escudo real ya no existe: pulsar R no lo lanza, solo abre la ventana de parry.
 static HookAction on_bash_block(ModContext*, void*, void* retval, void*) {
-    if (g_allowBash) return HOOK_CONTINUE;   // lo lanza el propio mod (animacion de parry o R + Y)
+    if (g_allowBash) return HOOK_CONTINUE;   // lo lanza el propio mod (animacion de parry o doble R)
     if (retval != nullptr) *static_cast<int*>(retval) = 0;
     return HOOK_SKIP_ORIGINAL;
 }
 
 // El golpe de escudo del parry es solo animacion: se le quita el ataque (no golpea ni rebota).
 static void on_bash_proc_post(ModContext*, void* args, void*, void*) {
-    if (!g_allowBash || g_realBash) return;   // el golpe real (R + Y) conserva su ataque
+    if (!g_allowBash || g_realBash) return;   // el golpe real (doble R) conserva su ataque
     daAlink_c* link = mods::arg<daAlink_c*>(args, 0);
     link->mProcVar5.field_0x3012 = 0;
 }
@@ -691,17 +693,22 @@ static HookAction on_execute_pre(ModContext*, void* args, void*, void*) {
 #endif
     }
 
-    // R + Y: golpe de escudo real, con cualquier enemigo (R solo ya no lo lanza)
+    // Enemigos fuera de la lista: golpe de escudo real con dos R seguidos.
+    // (Con los de la lista no existe el golpe de escudo real: R abre la ventana de parry.)
     if (g_bashCooldown > 0) g_bashCooldown--;
-    // Solo hace falta R (+ Y); no se exige L, asi funciona con la fijacion alternada.
-    if (g_playerStunTimer <= 0 && g_bashCooldown <= 0 &&
-        (mDoCPd_c::getHoldR(PAD_1) || mDoCPd_c::getHoldLockR(PAD_1)) && mDoCPd_c::getTrigY(PAD_1)) {
-        g_bashCooldown = BASH_COOLDOWN_TICKS;
-        g_allowBash = true;
-        g_realBash = true;
-        link->procGuardAttackInit();
-        g_realBash = false;
-        g_allowBash = false;
+    if (g_rTapTimer > 0) g_rTapTimer--;
+    if (!g_parryActive && g_playerStunTimer <= 0 && mDoCPd_c::getTrigLockR(PAD_1)) {
+        if (g_rTapTimer > 0 && g_bashCooldown <= 0) {
+            g_rTapTimer = 0;
+            g_bashCooldown = BASH_COOLDOWN_TICKS;
+            g_allowBash = true;
+            g_realBash = true;
+            link->procGuardAttackInit();
+            g_realBash = false;
+            g_allowBash = false;
+        } else {
+            g_rTapTimer = DOUBLE_TAP_TICKS;
+        }
     }
 
     // Animacion del golpe de escudo tras un parry (solo animacion, sin golpe real).
